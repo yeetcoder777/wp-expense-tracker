@@ -71,3 +71,96 @@ def extract_transaction(message: str) -> Transaction:
         ) from exc
 
     return Transaction.model_validate(data)
+
+def detect_intent(message: str) -> str:
+    response = client.chat.completions.create(
+        model=settings.groq_model,
+        messages=[
+            {
+                "role": "system",
+                "content": """
+You are an intent classifier for a personal expense tracker.
+
+Classify the user's message into exactly one of these intents:
+
+- transaction
+- total_expenses
+- today_expenses
+- this_month_expenses
+- recent_transactions
+- unknown
+
+Rules:
+
+- transaction: user is recording income or an expense
+- total_expenses: user asks about their total spending or income across all recorded transactions
+- today_expenses: user asks how much they spent today
+- this_month_expenses: user asks how much they spent during the current month
+- recent_transactions: user asks to see or list recent transactions
+- unknown: anything else
+
+Examples:
+
+"Paid ₹500 to Rahul"
+→ transaction
+
+"How much did I spend?"
+→ total_expenses
+
+"How much have I spent so far?"
+→ total_expenses
+
+"How much did I spend today?"
+→ today_expenses
+
+"What did I spend today?"
+→ today_expenses
+
+"Show today's expenses"
+→ today_expenses
+
+"How much did I spend this month?"
+→ this_month_expenses
+
+"How much have I spent this month?"
+→ this_month_expenses
+
+"What did I spend this month?"
+→ this_month_expenses
+
+"How much have I spent in August?"
+→ this_month_expenses
+
+"Show my recent transactions"
+→ recent_transactions
+
+"What did I spend recently?"
+→ recent_transactions
+
+"Hello"
+→ unknown
+
+Return ONLY valid JSON:
+
+{
+    "intent": "transaction"
+}
+""",
+            },
+            {
+                "role": "user",
+                "content": message,
+            },
+        ],
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+
+    content = response.choices[0].message.content
+
+    if not content:
+        raise ValueError("LLM returned an empty response")
+
+    data = json.loads(content)
+
+    return data["intent"]

@@ -3,8 +3,14 @@ from twilio.twiml.messaging_response import MessagingResponse
 from sqlalchemy.orm import Session
 
 from app.db.database import SessionLocal
-from app.services.transaction_service import save_transaction
-from app.services.llm_service import extract_transaction
+from app.services.llm_service import extract_transaction, detect_intent
+from app.services.transaction_service import (
+    save_transaction,
+    get_total_expenses,
+    get_today_expenses,
+    get_this_month_expenses,
+    get_transactions,
+)
 from app.services.conversation_service import (
     get_missing_fields,
     save_pending,
@@ -106,9 +112,124 @@ async def whatsapp_webhook(
                 content=str(response),
                 media_type="application/xml",
             )
+            
+        # --------------------------------------------------
+        # CASE 2: Query / non-transaction message
+        # --------------------------------------------------
+
+        intent = detect_intent(Body)
+
+        print("Detected intent:")
+        print(intent)
+
+        if intent == "total_expenses":
+            total = get_total_expenses(
+                db=db,
+                user_id=From,
+            )
+
+            response.message(
+                f"You've spent ₹{total:.2f} so far."
+            )
+
+            print("Total expenses:", total)
+            print("Twilio response:")
+            print(str(response))
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "today_expenses":
+            total = get_today_expenses(
+                db=db,
+                user_id=From,
+            )
+
+            response.message(
+                f"You've spent ₹{total:.2f} today."
+            )
+
+            print("Today's expenses:", total)
+            print("Twilio response:")
+            print(str(response))
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "this_month_expenses":
+            total = get_this_month_expenses(
+                db=db,
+                user_id=From,
+            )
+
+            response.message(
+                f"You've spent ₹{total:.2f} this month."
+            )
+
+            print("This month's expenses:", total)
+            print("Twilio response:")
+            print(str(response))
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+
+        if intent == "recent_transactions":
+
+            transactions = get_transactions(
+                db=db,
+                user_id=From,
+                limit=5,
+            )
+
+            if not transactions:
+                response.message(
+                    "You don't have any transactions recorded yet."
+                )
+
+                return Response(
+                    content=str(response),
+                    media_type="application/xml",
+                )
+
+            lines = ["Recent transactions:"]
+
+            for transaction in transactions:
+                person = transaction.person or "Unknown"
+                purpose = transaction.purpose or "Unspecified"
+
+                lines.append(
+                    f"₹{transaction.amount:.2f} → "
+                    f"{person} — {purpose}"
+                )
+
+            response.message("\n".join(lines))
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+
+        if intent == "unknown":
+
+            response.message(
+                "I can record expenses and show your spending. "
+                "Try something like 'Paid ₹500 to Rahul' "
+                "or 'How much did I spend?'"
+            )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
 
         # --------------------------------------------------
-        # CASE 2: New transaction
+        # CASE 3: New transaction
         # --------------------------------------------------
 
         transaction = extract_transaction(Body)
