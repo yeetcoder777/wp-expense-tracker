@@ -2,14 +2,16 @@ from fastapi import APIRouter, Form, Response
 from twilio.twiml.messaging_response import MessagingResponse
 from sqlalchemy.orm import Session
 
+from datetime import date
+
 from app.db.database import SessionLocal
 from app.services.llm_service import extract_transaction, detect_intent
 from app.services.transaction_service import (
     save_transaction,
     get_total_expenses,
-    get_today_expenses,
-    get_this_month_expenses,
     get_transactions,
+    get_transactions_by_date,
+    get_expenses_between,
 )
 from app.services.conversation_service import (
     get_missing_fields,
@@ -17,9 +19,42 @@ from app.services.conversation_service import (
     get_pending,
     clear_pending,
 )
+from app.services.date_service import (
+    get_yesterday_range,
+    get_this_week_range,
+    get_this_month_range,
+    get_last_month_range,
+)
 
 router = APIRouter()
 
+
+def format_transactions(
+    transactions,
+    title: str,
+) -> str:
+
+    if not transactions:
+        return f"{title}\nNo expenses found."
+
+    lines = [title]
+    total = 0
+
+    for transaction in transactions:
+        person = transaction.person or "Unknown"
+        purpose = transaction.purpose or "Unspecified"
+
+        lines.append(
+            f"₹{transaction.amount:.2f} → "
+            f"{person} — {purpose}"
+        )
+
+        total += transaction.amount
+
+    lines.append("")
+    lines.append(f"Total: ₹{total:.2f}")
+
+    return "\n".join(lines)
 
 @router.post("/whatsapp")
 async def whatsapp_webhook(
@@ -140,9 +175,76 @@ async def whatsapp_webhook(
                 content=str(response),
                 media_type="application/xml",
             )
+        
+        if intent == "today_total":
+            today = date.today()
+
+            transactions = get_transactions_by_date(
+                db=db,
+                user_id=From,
+                transaction_date=today,
+            )
+
+            total = sum(
+                transaction.amount
+                for transaction in transactions
+            )
+
+            response.message(
+                f"You've spent ₹{total:.2f} today."
+            )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+        
+        if intent == "today_transactions":
+            today = date.today()
+
+            transactions = get_transactions_by_date(
+                db=db,
+                user_id=From,
+                transaction_date=today,
+            )
+
+            if not transactions:
+                response.message(
+                    "You haven't recorded any expenses today."
+                )
+
+                return Response(
+                    content=str(response),
+                    media_type="application/xml",
+                )
+
+            lines = ["Today's expenses:"]
+
+            total = 0
+
+            for transaction in transactions:
+                person = transaction.person or "Unknown"
+                purpose = transaction.purpose or "Unspecified"
+
+                lines.append(
+                    f"₹{transaction.amount:.2f} → "
+                    f"{person} — {purpose}"
+                )
+
+                total += transaction.amount
+
+            lines.append("")
+            lines.append(f"Total: ₹{total:.2f}")
+
+            response.message("\n".join(lines))
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
             
         if intent == "today_expenses":
-            total = get_today_expenses(
+            total = get_today_expense(
                 db=db,
                 user_id=From,
             )
@@ -154,6 +256,190 @@ async def whatsapp_webhook(
             print("Today's expenses:", total)
             print("Twilio response:")
             print(str(response))
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "yesterday_total":
+            start_date, end_date = get_yesterday_range()
+
+            transactions = get_expenses_between(
+                db=db,
+                user_id=From,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            total = sum(
+                transaction.amount
+                for transaction in transactions
+            )
+
+            response.message(
+                f"You've spent ₹{total:.2f} yesterday."
+            )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "yesterday_transactions":
+            start_date, end_date = get_yesterday_range()
+
+            transactions = get_expenses_between(
+                db=db,
+                user_id=From,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            response.message(
+                format_transactions(
+                    transactions,
+                    "Yesterday's expenses:",
+                )
+            )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "week_total":
+            start_date, end_date = get_this_week_range()
+
+            transactions = get_expenses_between(
+                db=db,
+                user_id=From,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            total = sum(
+                transaction.amount
+                for transaction in transactions
+            )
+
+            response.message(
+                f"You've spent ₹{total:.2f} this week."
+            )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "week_transactions":
+            start_date, end_date = get_this_week_range()
+
+            transactions = get_expenses_between(
+                db=db,
+                user_id=From,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            response.message(
+                format_transactions(
+                    transactions,
+                    "This week's expenses:",
+                )
+            )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "month_total":
+            start_date, end_date = get_this_month_range()
+
+            transactions = get_expenses_between(
+                db=db,
+                user_id=From,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            total = sum(
+                transaction.amount
+                for transaction in transactions
+            )
+
+            response.message(
+                f"You've spent ₹{total:.2f} this month."
+            )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "month_transactions":
+            start_date, end_date = get_this_month_range()
+
+            transactions = get_expenses_between(
+                db=db,
+                user_id=From,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            response.message(
+                format_transactions(
+                    transactions,
+                    "This month's expenses:",
+                )
+            )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "last_month_total":
+            start_date, end_date = get_last_month_range()
+
+            transactions = get_expenses_between(
+                db=db,
+                user_id=From,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            total = sum(
+                transaction.amount
+                for transaction in transactions
+            )
+
+            response.message(
+                f"You've spent ₹{total:.2f} last month."
+            )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        if intent == "last_month_transactions":
+            start_date, end_date = get_last_month_range()
+
+            transactions = get_expenses_between(
+                db=db,
+                user_id=From,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            response.message(
+                format_transactions(
+                    transactions,
+                    "Last month's expenses:",
+                )
+            )
 
             return Response(
                 content=str(response),
@@ -280,11 +566,18 @@ async def whatsapp_webhook(
             transaction=transaction,
         )
 
-        response.message(
-            f"Recorded ₹{transaction.amount} "
-            f"paid to {transaction.person or 'unknown'} "
-            f"for {transaction.purpose or 'unspecified purpose'}."
-        )
+        if transaction.transaction_type == "income":
+            response.message(
+                f"Recorded ₹{transaction.amount} income "
+                f"from {transaction.person or 'unknown'} "
+                f"for {transaction.purpose or 'unspecified purpose'}."
+            )
+        else:
+            response.message(
+                f"Recorded ₹{transaction.amount} "
+                f"paid to {transaction.person or 'unknown'} "
+                f"for {transaction.purpose or 'unspecified purpose'}."
+            )
 
         print("Saved to database:")
         print(f"Transaction ID: {saved_transaction.id}")

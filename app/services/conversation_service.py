@@ -9,8 +9,9 @@ from app.schemas.transaction import Transaction
 def get_missing_fields(transaction: Transaction) -> list[str]:
     missing = []
 
-    if transaction.person is None:
-        missing.append("person")
+    if transaction.transaction_type == "expense":
+        if transaction.person is None:
+            missing.append("person")
 
     if transaction.purpose is None:
         missing.append("purpose")

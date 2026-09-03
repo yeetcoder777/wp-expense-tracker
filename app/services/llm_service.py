@@ -1,4 +1,5 @@
 import json
+from datetime import date
 
 from groq import Groq
 
@@ -70,80 +71,106 @@ def extract_transaction(message: str) -> Transaction:
             f"LLM returned invalid JSON: {content}"
         ) from exc
 
-    return Transaction.model_validate(data)
+    transaction = Transaction.model_validate(data)
+
+    if transaction.transaction_date is None:
+        transaction.transaction_date = date.today()
+
+    return transaction
 
 def detect_intent(message: str) -> str:
     response = client.chat.completions.create(
         model=settings.groq_model,
         messages=[
             {
-                "role": "system",
-                "content": """
+    "role": "system",
+    "content": """
 You are an intent classifier for a personal expense tracker.
 
 Classify the user's message into exactly one of these intents:
 
 - transaction
 - total_expenses
-- today_expenses
-- this_month_expenses
+- today_total
+- today_transactions
+- yesterday_total
+- yesterday_transactions
+- week_total
+- week_transactions
+- month_total
+- month_transactions
+- last_month_total
+- last_month_transactions
 - recent_transactions
 - unknown
 
 Rules:
 
-- transaction: user is recording income or an expense
-- total_expenses: user asks about their total spending or income across all recorded transactions
-- today_expenses: user asks how much they spent today
-- this_month_expenses: user asks how much they spent during the current month
-- recent_transactions: user asks to see or list recent transactions
-- unknown: anything else
+- transaction:
+  User is recording an income or expense.
+  Examples:
+  "Paid ₹500 to Rahul"
+  "Received ₹50,000 salary"
 
-Examples:
+- total_expenses:
+  User asks how much they have spent overall.
+  Examples:
+  "How much did I spend?"
+  "How much have I spent so far?"
 
-"Paid ₹500 to Rahul"
-→ transaction
+- today_total:
+  User asks for the total amount spent today.
+  Examples:
+  "How much did I spend today?"
+  "How much have I spent today?"
 
-"How much did I spend?"
-→ total_expenses
+- today_transactions:
+  User asks what transactions/expenses happened today.
+  Examples:
+  "What did I spend today?"
+  "Show today's expenses"
 
-"How much have I spent so far?"
-→ total_expenses
+- yesterday_total:
+  User asks for the total amount spent yesterday.
 
-"How much did I spend today?"
-→ today_expenses
+- yesterday_transactions:
+  User asks what they spent yesterday.
 
-"What did I spend today?"
-→ today_expenses
+- week_total:
+  User asks for the total amount spent this week.
 
-"Show today's expenses"
-→ today_expenses
+- week_transactions:
+  User asks what they spent this week.
 
-"How much did I spend this month?"
-→ this_month_expenses
+- month_total:
+  User asks for the total amount spent this month.
 
-"How much have I spent this month?"
-→ this_month_expenses
+- month_transactions:
+  User asks what they spent this month.
 
-"What did I spend this month?"
-→ this_month_expenses
+- last_month_total:
+  User asks for the total amount spent last month.
 
-"How much have I spent in August?"
-→ this_month_expenses
+- last_month_transactions:
+  User asks what they spent last month.
 
-"Show my recent transactions"
-→ recent_transactions
+- recent_transactions:
+  User asks to see recent transactions without specifying a particular date range.
+  Examples:
+  "Show my recent transactions"
+  "What did I spend recently?"
 
-"What did I spend recently?"
-→ recent_transactions
+- unknown:
+  Anything that does not match the above intents.
 
-"Hello"
-→ unknown
+Important:
+"How much" means the user wants a total.
+"What did I spend" / "Show" means the user wants a transaction list.
 
 Return ONLY valid JSON:
 
 {
-    "intent": "transaction"
+    "intent": "one_of_the_intents_above"
 }
 """,
             },
