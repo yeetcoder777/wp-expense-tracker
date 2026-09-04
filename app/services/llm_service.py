@@ -315,6 +315,7 @@ Classify the user's message into exactly ONE of these intents:
 - week_income
 - month_income
 - recent_transactions
+- monthly_summary
 - unknown
 
 
@@ -522,6 +523,33 @@ Examples:
 "What are my recent transactions?"
 
 
+MONTHLY_SUMMARY
+--------------
+User wants a complete financial summary for the current month.
+
+Examples:
+"Give me my monthly summary"
+"Show my monthly summary"
+"How did I do this month?"
+"Give me a summary of this month"
+"Summarize my finances this month"
+"Show my income and expenses this month"
+"What's my financial summary for this month?"
+
+Return "monthly_summary" when the user wants an overall
+summary containing income, expenses, balance, and spending categories.
+
+Important:
+"How much did I spend this month?"
+-> month_total
+
+"How much did I earn this month?"
+-> month_income
+
+"Give me my monthly summary"
+-> monthly_summary
+
+
 UNKNOWN
 -------
 
@@ -550,6 +578,35 @@ It is NOT a transaction-recording message.
 Return "category_query" whenever the user asks about spending
 for a particular category.
 
+CATEGORY_LIST_QUERY
+-------------------
+User asks to SEE or SHOW the actual transactions belonging to a category.
+
+Examples:
+"Show my food expenses"
+"Show my food expenses this month"
+"List my transport expenses"
+"Show my shopping transactions"
+"Show my Uber expenses"
+"Show my bills from last month"
+
+Return "category_list_query" when the user wants to see the
+individual transactions.
+
+Important distinction:
+
+"How much did I spend on food?"
+-> category_query
+
+"How much did I spend on food this month?"
+-> category_query
+
+"Show my food expenses"
+-> category_list_query
+
+"List my food expenses this month"
+-> category_list_query
+
 
 IMPORTANT
 ---------
@@ -574,6 +631,14 @@ IMPORTANT
   
 - If the user mentions a specific spending category and asks about
   existing expenses, classify it as "category_query".
+  
+- If the user asks for the amount/total spent in a category, use "category_query".
+
+- If the user asks to show/list/view the individual transactions in a category, use "category_list_query".
+
+- If the user asks for an overall financial summary of the month, use "monthly_summary".
+
+- Do not use "monthly_summary" for a question asking only for total expenses or only for total income.
 
 Return ONLY valid JSON:
 
@@ -604,3 +669,106 @@ Return ONLY valid JSON:
         ) from exc
 
     return data["intent"]
+  
+
+def extract_category_list_query(message: str) -> dict:
+    prompt = """
+You extract information from a user's request to LIST expense transactions.
+
+Return ONLY valid JSON.
+
+The JSON must contain exactly:
+
+{
+    "category": string,
+    "time_range": string
+}
+
+Allowed categories:
+- food
+- transport
+- shopping
+- bills
+- entertainment
+- health
+- education
+- other
+
+Allowed time ranges:
+- all
+- today
+- yesterday
+- this_week
+- this_month
+- last_month
+
+Category mapping:
+- dinner, lunch, breakfast, restaurant, groceries, snacks -> food
+- Uber, Ola, taxi, bus, train, fuel, metro -> transport
+- clothes, electronics, Amazon purchases, accessories -> shopping
+- electricity, internet, phone bill, rent, subscriptions -> bills
+- movies, games, concerts, events -> entertainment
+- medicines, doctors, hospitals, gym, medical expenses -> health
+- books, courses, college fees, certifications -> education
+
+Time mapping:
+- today -> today
+- yesterday -> yesterday
+- this week -> this_week
+- this month -> this_month
+- last month -> last_month
+- if no time range is specified -> all
+
+Never invent information.
+Always return one allowed category and one allowed time_range.
+"""
+
+    response = client.chat.completions.create(
+        model=settings.groq_model,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": message},
+        ],
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+
+    content = response.choices[0].message.content
+
+    if not content:
+        raise ValueError("LLM returned an empty response")
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"LLM returned invalid JSON: {content}"
+        ) from exc
+
+    allowed_categories = {
+        "food",
+        "transport",
+        "shopping",
+        "bills",
+        "entertainment",
+        "health",
+        "education",
+        "other",
+    }
+
+    allowed_time_ranges = {
+        "all",
+        "today",
+        "yesterday",
+        "this_week",
+        "this_month",
+        "last_month",
+    }
+
+    if data.get("category") not in allowed_categories:
+        raise ValueError(f"Invalid category: {data.get('category')}")
+
+    if data.get("time_range") not in allowed_time_ranges:
+        raise ValueError(f"Invalid time range: {data.get('time_range')}")
+
+    return data

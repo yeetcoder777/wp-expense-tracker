@@ -247,3 +247,92 @@ def get_category_expenses_between(
     )
 
     return result if isinstance(result, Decimal) else Decimal(str(result))
+
+def get_category_transactions(
+    db,
+    user_id,
+    category,
+    start_date=None,
+    end_date=None,
+):
+    query = (
+        db.query(TransactionDB)
+        .filter(
+            TransactionDB.user_id == user_id,
+            TransactionDB.transaction_type == "expense",
+            TransactionDB.category == category,
+        )
+    )
+
+    if start_date is not None:
+        query = query.filter(TransactionDB.transaction_date >= start_date)
+
+    if end_date is not None:
+        query = query.filter(TransactionDB.transaction_date <= end_date)
+
+    return query.order_by(
+        TransactionDB.transaction_date.desc(),
+        TransactionDB.created_at.desc(),
+    ).all()
+    
+def get_monthly_summary(db, user_id, start_date, end_date):
+    expense_transactions = get_expenses_between(
+        db=db,
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    income_transactions = get_income_between(
+        db=db,
+        user_id=user_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    expenses = sum(
+        transaction.amount
+        for transaction in expense_transactions
+    )
+
+    income = sum(
+        transaction.amount
+        for transaction in income_transactions
+    )
+
+    category_rows = (
+        db.query(
+            TransactionDB.category,
+            func.coalesce(func.sum(TransactionDB.amount), 0),
+        )
+        .filter(
+            TransactionDB.user_id == user_id,
+            TransactionDB.transaction_type == "expense",
+            TransactionDB.transaction_date >= start_date,
+            TransactionDB.transaction_date <= end_date,
+        )
+        .group_by(TransactionDB.category)
+        .order_by(
+            func.sum(TransactionDB.amount).desc()
+        )
+        .all()
+    )
+
+    categories = [
+        {
+            "category": category or "other",
+            "amount": (
+                amount
+                if isinstance(amount, Decimal)
+                else Decimal(str(amount))
+            ),
+        }
+        for category, amount in category_rows
+    ]
+
+    return {
+        "expenses": expenses,
+        "income": income,
+        "balance": income - expenses,
+        "categories": categories,
+    }

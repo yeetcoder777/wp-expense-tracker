@@ -1,3 +1,4 @@
+from decimal import Decimal
 from fastapi import APIRouter, Form, Response
 from twilio.twiml.messaging_response import MessagingResponse
 from sqlalchemy.orm import Session
@@ -8,6 +9,7 @@ from app.services.llm_service import (
     extract_transaction,
     detect_intent,
     extract_category_query,
+    extract_category_list_query,
 )
 from app.services.transaction_service import (
     save_transaction,
@@ -20,6 +22,8 @@ from app.services.transaction_service import (
     get_income_between,
     get_category_expenses,
     get_category_expenses_between,
+    get_category_transactions,
+    get_monthly_summary,
 )
 from app.services.conversation_service import (
     get_missing_fields,
@@ -283,6 +287,87 @@ async def whatsapp_webhook(
             print("Category:", category)
             print("Time range:", time_range)
             print("Total:", total)
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        # --------------------------------------------------
+        # CATEGORY LIST QUERY
+        # --------------------------------------------------
+        if intent == "category_list_query":
+            query = extract_category_list_query(Body)
+
+            category = query["category"]
+            time_range = query["time_range"]
+
+            print("Category list query:")
+            print(query)
+
+            start_date, end_date = get_category_date_range(time_range)
+
+            transactions = get_category_transactions(
+                db=db,
+                user_id=From,
+                category=category,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            if not transactions:
+                response.message(
+                    f"No {category} expenses found"
+                    + (
+                        f" {time_range.replace('_', ' ')}."
+                        if time_range != "all"
+                        else "."
+                    )
+                )
+
+                return Response(
+                    content=str(response),
+                    media_type="application/xml",
+                )
+
+            lines = [
+                f"Your {category} expenses"
+                + (
+                    f" ({time_range.replace('_', ' ')})"
+                    if time_range != "all"
+                    else ""
+                )
+                + ":"
+            ]
+
+            total = Decimal("0")
+
+            for transaction in transactions:
+                total += transaction.amount
+
+                date_text = (
+                    transaction.transaction_date.strftime("%d %b")
+                    if transaction.transaction_date
+                    else "Unknown date"
+                )
+
+                purpose_text = transaction.purpose or "No purpose"
+
+                if transaction.person:
+                    lines.append(
+                        f"• ₹{transaction.amount:.2f} — "
+                        f"{purpose_text} — {transaction.person} — {date_text}"
+                    )
+                else:
+                    lines.append(
+                        f"• ₹{transaction.amount:.2f} — "
+                        f"{purpose_text} — {date_text}"
+                    )
+
+            lines.append("")
+            lines.append(f"Total: ₹{total:.2f}")
+
+            response.message("\n".join(lines))
 
             return Response(
                 content=str(response),
@@ -596,6 +681,49 @@ async def whatsapp_webhook(
                     "This week's expenses:",
                 )
             )
+
+            return Response(
+                content=str(response),
+                media_type="application/xml",
+            )
+            
+        # --------------------------------------------------
+        # MONTHLY SUMMARY
+        # --------------------------------------------------
+        if intent == "monthly_summary":
+            start_date, end_date = get_this_month_range()
+
+            summary = get_monthly_summary(
+                db=db,
+                user_id=From,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            expenses = summary["expenses"]
+            income = summary["income"]
+            balance = summary["balance"]
+            categories = summary["categories"]
+
+            lines = [
+                "📊 Monthly Summary",
+                "",
+                f"Total income: ₹{income:.2f}",
+                f"Total expenses: ₹{expenses:.2f}",
+                f"Net balance: ₹{balance:.2f}",
+            ]
+
+            if categories:
+                lines.append("")
+                lines.append("Top spending categories:")
+
+                for item in categories[:5]:
+                    lines.append(
+                        f"• {item['category'].capitalize()}: "
+                        f"₹{item['amount']:.2f}"
+                    )
+
+            response.message("\n".join(lines))
 
             return Response(
                 content=str(response),
