@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from datetime import date
+from datetime import date, datetime, time
 
 from app.db.models import TransactionDB
 from app.schemas.transaction import Transaction
@@ -69,18 +69,14 @@ def get_today_expenses(
     db: Session,
     user_id: str,
 ) -> Decimal:
-
-    start_of_day = datetime.combine(
-        datetime.now().date(),
-        time.min,
-    )
+    today = datetime.now(IST).date()
 
     result = (
         db.query(func.coalesce(func.sum(TransactionDB.amount), 0))
         .filter(
             TransactionDB.user_id == user_id,
             TransactionDB.transaction_type == "expense",
-            TransactionDB.created_at >= start_of_day,
+            TransactionDB.transaction_date == today,
         )
         .scalar()
     )
@@ -128,26 +124,6 @@ def get_transactions_by_date(
     transaction_date: date,
     limit: int = 20,
 ) -> list[TransactionDB]:
-
-    return (
-        db.query(TransactionDB)
-        .filter(
-            TransactionDB.user_id == user_id,
-            TransactionDB.transaction_type == "expense",
-            TransactionDB.transaction_date == transaction_date,
-        )
-        .order_by(TransactionDB.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-    
-def get_transactions_by_date(
-    db: Session,
-    user_id: str,
-    transaction_date: date,
-    limit: int = 20,
-) -> list[TransactionDB]:
-
     return (
         db.query(TransactionDB)
         .filter(
@@ -194,3 +170,80 @@ def get_total_income(
     )
 
     return Decimal(result)
+
+def get_today_income(db, user_id):
+    today = datetime.now(IST).date()
+
+    result = (
+        db.query(
+            func.coalesce(
+                func.sum(TransactionDB.amount),
+                0
+            )
+        )
+        .filter(
+            TransactionDB.user_id == user_id,
+            TransactionDB.transaction_type == "income",
+            TransactionDB.transaction_date == today,
+        )
+        .scalar()
+    )
+
+    return (
+        result
+        if isinstance(result, Decimal)
+        else Decimal(str(result))
+    )
+
+
+def get_income_between(
+    db,
+    user_id,
+    start_date,
+    end_date,
+):
+    return (
+        db.query(TransactionDB)
+        .filter(
+            TransactionDB.user_id == user_id,
+            TransactionDB.transaction_type == "income",
+            TransactionDB.transaction_date >= start_date,
+            TransactionDB.transaction_date <= end_date,
+        )
+        .order_by(TransactionDB.transaction_date.desc())
+        .all()
+    )
+    
+def get_category_expenses(db, user_id, category):
+    result = (
+        db.query(func.coalesce(func.sum(TransactionDB.amount), 0))
+        .filter(
+            TransactionDB.user_id == user_id,
+            TransactionDB.transaction_type == "expense",
+            TransactionDB.category == category,
+        )
+        .scalar()
+    )
+
+    return result if isinstance(result, Decimal) else Decimal(str(result))
+
+def get_category_expenses_between(
+    db,
+    user_id,
+    category,
+    start_date,
+    end_date,
+):
+    result = (
+        db.query(func.coalesce(func.sum(TransactionDB.amount), 0))
+        .filter(
+            TransactionDB.user_id == user_id,
+            TransactionDB.transaction_type == "expense",
+            TransactionDB.category == category,
+            TransactionDB.transaction_date >= start_date,
+            TransactionDB.transaction_date <= end_date,
+        )
+        .scalar()
+    )
+
+    return result if isinstance(result, Decimal) else Decimal(str(result))
