@@ -1,0 +1,23 @@
+services:
+  backend:
+    image: expense-tracker:local
+    build:
+      context: .
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    env_file:
+      - .env
+
+    environment:
+      EXTRACTION_PROVIDER: gliner2
+      GLINER2_LOCAL_FILES_ONLY: "false"
+      GLINER2_FALLBACK_TO_GROQ: "false"
+      HF_HOME: /models
+
+    volumes:
+      - gliner-model-cache:/models
+
+volumes:
+  gliner-model-cache:

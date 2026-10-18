@@ -10,3 +10,8 @@ sqlalchemy
 psycopg[binary]
 psycopg2-binary
 typesafe-sdk==0.7.5
+gliner2[local]==2.1.0
+transformers>=4.43,<6
+sentencepiece>=0.2,<1
+protobuf>=5,<8
+dateparser>=1.2,<2
