@@ -1,9 +1,11 @@
+import base64
 import json
 
 from app.services.date_service import get_today
 from groq import Groq
 from app.config import settings
 from app.schemas.transaction import Transaction
+from app.services.intent_registry import validate_intent
 
 
 client = Groq(api_key=settings.groq_api_key)
@@ -15,9 +17,8 @@ You are a transaction extraction system for a personal expense tracker.
 Your job is to extract financial transaction information from natural-language
 messages.
 
-Return ONLY valid JSON.
-
-The JSON must contain exactly these fields:
+Return ONLY valid JSON: an object with a "transactions" array. Include one item
+for each distinct transaction in the order stated. Each item has these fields:
 
 {
     "transaction_type": "expense" or "income",
@@ -88,7 +89,19 @@ Rules:
 """
 
 
-def extract_transaction(message: str) -> Transaction:
+def _flatten_transaction_items(value) -> list[object]:
+    if not isinstance(value, list):
+        return [value]
+    return [item for nested in value for item in _flatten_transaction_items(nested)]
+
+
+def extract_transactions(message: str) -> list[Transaction]:
+    from app.services.transaction_extraction_service import extract_transactions as extract
+
+    return extract(message)
+
+
+def extract_transactions_groq(message: str) -> list[Transaction]:
     response = client.chat.completions.create(
         model=settings.groq_model,
         messages=[
@@ -117,12 +130,72 @@ def extract_transaction(message: str) -> Transaction:
             f"LLM returned invalid JSON: {content}"
         ) from exc
 
-    transaction = Transaction.model_validate(data)
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict) and "transactions" in data:
+        items = data["transactions"]
+    else:
+        items = [data]
+    if not isinstance(items, list):
+        raise ValueError("LLM returned transactions in an invalid format")
+    items = _flatten_transaction_items(items)
+    if not items:
+        raise ValueError("LLM returned no transactions")
+    transactions = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("LLM returned a transaction that is not an object")
+        transaction = Transaction.model_validate(item)
+        if transaction.transaction_date is None:
+            transaction.transaction_date = get_today()
+        transactions.append(transaction)
+    return transactions
 
-    if transaction.transaction_date is None:
-        transaction.transaction_date = get_today()
 
-    return transaction
+def extract_transaction(message: str) -> Transaction:
+    transactions = extract_transactions(message)
+    if len(transactions) != 1:
+        raise ValueError("Expected exactly one transaction")
+    return transactions[0]
+
+
+def extract_receipt_transactions(image_bytes: bytes, mime_type: str) -> list[Transaction]:
+    if not settings.groq_vision_model:
+        raise ValueError("Set GROQ_VISION_MODEL to a Groq model that supports image input")
+    image_data = base64.b64encode(image_bytes).decode("ascii")
+    response = client.chat.completions.create(
+        model=settings.groq_vision_model,
+        messages=[
+            {"role": "system", "content": (
+                "Extract every clearly itemized purchase from this receipt. Return JSON with one transactions array. "
+                "Each entry must have transaction_type='expense', amount as a positive number, currency as an ISO code "
+                "(use INR when shown as ₹ or unspecified), person as the merchant or null, purpose as a short description, "
+                "category from food, transport, shopping, bills, entertainment, health, education, other, "
+                "and transaction_date as YYYY-MM-DD or null. Do not guess unreadable values. "
+                "If only a total is legible, return one transaction for that total."
+            )},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Read this receipt."},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}},
+            ]},
+        ],
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("Vision model returned an empty response")
+    try:
+        items = json.loads(content)["transactions"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ValueError("Vision model returned invalid receipt data") from exc
+    if not isinstance(items, list) or not items:
+        raise ValueError("No transactions could be read from this receipt")
+    transactions = [Transaction.model_validate(item) for item in items[:50]]
+    for transaction in transactions:
+        if transaction.transaction_date is None:
+            transaction.transaction_date = get_today()
+    return transactions
 
 def extract_category_query(message: str) -> dict:
     response = client.chat.completions.create(
@@ -288,6 +361,12 @@ Return ONLY valid JSON.
 
 
 def detect_intent(message: str) -> str:
+    from app.services.intent_classifier_service import classify_intent
+
+    return classify_intent(message).label
+
+
+def detect_intent_groq(message: str) -> str:
     response = client.chat.completions.create(
         model=settings.groq_model,
         messages=[
@@ -315,6 +394,8 @@ Classify the user's message into exactly ONE of these intents:
 - week_income
 - month_income
 - recent_transactions
+- category_query
+- category_list_query
 - monthly_summary
 - unknown
 
@@ -668,7 +749,7 @@ Return ONLY valid JSON:
             f"LLM returned invalid JSON: {content}"
         ) from exc
 
-    return data["intent"]
+    return validate_intent(data["intent"])
   
 
 def extract_category_list_query(message: str) -> dict:

@@ -6,3 +6,7 @@ python-dotenv
 twilio
 python-multipart
 groq
+sqlalchemy
+psycopg[binary]
+psycopg2-binary
+typesafe-sdk==0.7.5

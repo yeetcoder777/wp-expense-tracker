@@ -1,1057 +1,177 @@
-from decimal import Decimal
-from fastapi import APIRouter, Form, Response
-from twilio.twiml.messaging_response import MessagingResponse
+import logging
+import re
+from collections.abc import Sequence
+
+from fastapi import APIRouter, Form, HTTPException, Request, Response
+from starlette.concurrency import run_in_threadpool
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from twilio.request_validator import RequestValidator
+from twilio.twiml.messaging_response import MessagingResponse
 
+from app.config import settings
 from app.db.database import SessionLocal
-
-from app.services.llm_service import (
-    extract_transaction,
-    detect_intent,
-    extract_category_query,
-    extract_category_list_query,
-)
-from app.services.transaction_service import (
-    save_transaction,
-    get_total_expenses,
-    get_transactions,
-    get_transactions_by_date,
-    get_expenses_between,
-    get_total_income,
-    get_today_income,
-    get_income_between,
-    get_category_expenses,
-    get_category_expenses_between,
-    get_category_transactions,
-    get_monthly_summary,
-)
-from app.services.conversation_service import (
-    get_missing_fields,
-    save_pending,
-    get_pending,
-    clear_pending,
-)
-from app.services.date_service import (
-    get_today,
-    get_yesterday_range,
-    get_this_week_range,
-    get_this_month_range,
-    get_last_month_range,
-)
-
+from app.db.models import ProcessedWebhook, TransactionDB
+from app.schemas.transaction import Transaction
+from app.services.llm_service import detect_intent, extract_transactions, extract_category_query, extract_category_list_query
+from app.services.transaction_service import save_transaction
+from app.services.conversation_service import get_missing_fields, get_pending, save_pending, clear_pending
+from app.services.transaction_command_service import handle_transaction_command
+from app.services.budget_command_service import handle_budget_command
+from app.services.budget_service import evaluate_budget_alerts
+from app.services.whatsapp_query_service import query_reply
+from app.services.transaction_extraction_service import ExtractionUnavailable
 
 router = APIRouter()
+logger = logging.getLogger("uvicorn.error")
 
 
-def format_transactions(
-    transactions,
-    title: str,
-) -> str:
+def xml_reply(message: str) -> Response:
+    response = MessagingResponse()
+    response.message(message)
+    return Response(content=str(response), media_type="application/xml")
 
-    if not transactions:
-        return f"{title}\nNo expenses found."
 
-    lines = [title]
-    total = 0
+def validate_twilio_request(request: Request, form_data) -> None:
+    if not settings.twilio_auth_token:
+        if settings.environment.lower() == "production":
+            raise HTTPException(status_code=503, detail="Twilio signature validation is not configured")
+        return
+    validator = RequestValidator(settings.twilio_auth_token)
+    callback = settings.twilio_webhook_url or str(request.url)
+    if not validator.validate(callback, form_data, request.headers.get("X-Twilio-Signature", "")):
+        raise HTTPException(status_code=403, detail="Invalid Twilio request signature")
 
-    for transaction in transactions:
-        person = transaction.person or "Unknown"
-        purpose = transaction.purpose or "Unspecified"
 
-        lines.append(
-            f"₹{transaction.amount:.2f} → "
-            f"{person} — {purpose}"
-        )
+def already_processed(db: Session, message_sid: str | None) -> bool:
+    return bool(message_sid and db.get(ProcessedWebhook, message_sid))
 
-        total += transaction.amount
 
-    lines.append("")
-    lines.append(f"Total: ₹{total:.2f}")
+def claim_processed_webhook(db: Session, user_id: str, message_sid: str | None) -> bool:
+    if not message_sid:
+        return True
+    try:
+        db.add(ProcessedWebhook(message_sid=message_sid, user_id=user_id))
+        db.commit()
+        return True
+    except IntegrityError:
+        db.rollback()
+        if already_processed(db, message_sid):
+            return False
+        raise
 
+
+def save_webhook_transactions(
+    db: Session, user_id: str, transactions: Sequence[Transaction], message_sid: str | None,
+) -> tuple[list[TransactionDB], bool]:
+    if already_processed(db, message_sid):
+        return [], True
+    try:
+        if message_sid:
+            db.add(ProcessedWebhook(message_sid=message_sid, user_id=user_id))
+        saved = [save_transaction(db, user_id, item, commit=False) for item in transactions]
+        db.commit()
+        for item in saved:
+            db.refresh(item)
+        return saved, False
+    except IntegrityError:
+        db.rollback()
+        if already_processed(db, message_sid):
+            return [], True
+        raise
+
+
+def record_reply(db, user_id, transactions, message_sid):
+    saved, duplicate = save_webhook_transactions(db, user_id, transactions, message_sid)
+    if duplicate:
+        return "That transaction was already recorded."
+    lines = ["Recorded transactions:"] if len(saved) > 1 else []
+    for item in saved:
+        action = "received" if item.transaction_type == "income" else "spent"
+        detail = f" for {item.purpose}" if item.purpose else ""
+        lines.append(f"Recorded {item.currency} {item.amount:.2f} {action}{detail}. #{item.id}")
+    for item in saved:
+        lines.extend(evaluate_budget_alerts(db, user_id, item))
+    logger.info("Saved %s transaction(s) for webhook %s", len(saved), message_sid)
     return "\n".join(lines)
-
-def get_category_date_range(time_range):
-    today = get_today()
-
-    if time_range == "all":
-        return None, None
-
-    if time_range == "today":
-        return today, today
-
-    if time_range == "yesterday":
-        start, end = get_yesterday_range()
-        return start, end
-
-    if time_range == "this_week":
-        start, end = get_this_week_range()
-        return start, end
-
-    if time_range == "this_month":
-        start, end = get_this_month_range()
-        return start, end
-
-    if time_range == "last_month":
-        start, end = get_last_month_range()
-        return start, end
-
-    raise ValueError(f"Unsupported category time range: {time_range}")
 
 
 @router.post("/whatsapp")
 async def whatsapp_webhook(
+    request: Request,
     Body: str = Form(...),
     From: str = Form(...),
+    MessageSid: str | None = Form(default=None),
+    MediaUrl0: str | None = Form(default=None),
+    MediaContentType0: str | None = Form(default=None),
 ):
-    db: Session = SessionLocal()
-
-    print(f"Message from {From}: {Body}")
-
-    response = MessagingResponse()
-
+    validate_twilio_request(request, await request.form())
+    db = SessionLocal()
     try:
+        if already_processed(db, MessageSid):
+            return xml_reply("That message was already processed.")
+        if MediaUrl0:
+            return xml_reply("To review and import receipt images or bank CSV files, open the tracker dashboard and choose Imports.")
+
+        changes_state = bool(re.match(
+            r"^(?:undo(?:\s+last(?:\s+transaction)?)?|"
+            r"(?:delete|remove)\s+(?:transaction\s+)?(?:#?\d+|last)|"
+            r"(?:edit|change|update)\s+(?:transaction\s+)?(?:#?\d+|last)\s+"
+            r"(?:amount|date|category|purpose)\b|"
+            r"(?:set|create|update)\s+.+\bbudget\b)", Body.strip().lower(),
+        ))
+        if changes_state and not claim_processed_webhook(db, From, MessageSid):
+            return xml_reply("That message was already processed.")
+        for handler in (handle_transaction_command, handle_budget_command):
+            reply = handler(db, From, Body)
+            if reply is not None:
+                return xml_reply(reply)
+
         pending_data = get_pending(db, From)
-
-        # --------------------------------------------------
-        # CASE 1: User is answering a previous question
-        # --------------------------------------------------
-
         if pending_data:
-            pending, pending_field = pending_data
-
-            print("Found pending transaction:")
-            print(pending.model_dump())
-
-            print("Waiting for field:")
-            print(pending_field)
-
-            # Put the user's answer into the field
-            # that the bot explicitly asked for.
-            if pending_field == "person":
-                pending.person = Body.strip()
-
-            elif pending_field == "purpose":
-                pending.purpose = Body.strip()
-
+            pending, field = pending_data
+            pending = Transaction.model_validate({**pending.model_dump(), field: Body.strip()})
             missing = get_missing_fields(pending)
-
-            print("Updated transaction:")
-            print(pending.model_dump())
-
-            print("Still missing:")
-            print(missing)
-
-            # --------------------------------------------------
-            # Still missing something
-            # --------------------------------------------------
-
             if missing:
-                save_pending(
-                    db,
-                    From,
-                    pending,
-                    missing[0],
-                )
-
-                if missing[0] == "person":
-                    response.message("Who did you pay?")
-
-                elif missing[0] == "purpose":
-                    if pending.transaction_type == "income":
-                        response.message("What was this income for?")
-                    else:
-                        response.message("What was the purpose?")
-
-                return Response(
-                    content=str(response),
-                    media_type="application/xml",
-                )
-
-            # --------------------------------------------------
-            # Transaction is now complete
-            # --------------------------------------------------
-
-            saved_transaction = save_transaction(
-                db=db,
-                user_id=From,
-                transaction=pending,
-            )
-
+                save_pending(db, From, pending, missing[0])
+                return xml_reply("What was the purpose?")
+            reply = record_reply(db, From, [pending], MessageSid)
             clear_pending(db, From)
+            return xml_reply(reply)
 
-            # --------------------------------------------------
-            # Confirmation message
-            # --------------------------------------------------
-
-            if pending.transaction_type == "income":
-
-                if pending.person:
-                    message = (
-                        f"Recorded ₹{pending.amount} "
-                        f"received from {pending.person}"
-                    )
-                else:
-                    message = (
-                        f"Recorded ₹{pending.amount} received"
-                    )
-
-            else:
-
-                if pending.person:
-                    message = (
-                        f"Recorded ₹{pending.amount} "
-                        f"paid to {pending.person}"
-                    )
-                else:
-                    message = (
-                        f"Recorded ₹{pending.amount}"
-                    )
-
-            if pending.purpose:
-                message += f" for {pending.purpose}"
-
-            message += "."
-
-            response.message(message)
-
-            print("Saved to database:")
-            print(f"Transaction ID: {saved_transaction.id}")
-
-            print("Completed transaction:")
-            print(pending.model_dump())
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # CASE 2: Query / non-transaction message
-        # --------------------------------------------------
-
-        intent = detect_intent(Body)
-
-        print("Detected intent:")
-        print(intent)
-        
-        # --------------------------------------------------
-        # CATEGORY QUERY
-        # --------------------------------------------------
-
+        intent = await run_in_threadpool(detect_intent, Body)
+        logger.info("Detected intent: %s", intent)
+        category = None
         if intent == "category_query":
-
-            query = extract_category_query(Body)
-
-            category = query["category"]
-            time_range = query["time_range"]
-
-            print("Category query:")
-            print(query)
-
-            start_date, end_date = get_category_date_range(time_range)
-
-            if time_range == "all":
-
-                total = get_category_expenses(
-                    db=db,
-                    user_id=From,
-                    category=category,
-                )
-
-                period_text = "overall"
-
-            else:
-
-                total = get_category_expenses_between(
-                    db=db,
-                    user_id=From,
-                    category=category,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-
-                period_names = {
-                    "today": "today",
-                    "yesterday": "yesterday",
-                    "this_week": "this week",
-                    "this_month": "this month",
-                    "last_month": "last month",
-                }
-
-                period_text = period_names[time_range]
-
-            response.message(
-                f"You've spent ₹{total:.2f} on {category} {period_text}."
-            )
-
-            print("Category:", category)
-            print("Time range:", time_range)
-            print("Total:", total)
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-            
-        # --------------------------------------------------
-        # CATEGORY LIST QUERY
-        # --------------------------------------------------
-        if intent == "category_list_query":
-            query = extract_category_list_query(Body)
-
-            category = query["category"]
-            time_range = query["time_range"]
-
-            print("Category list query:")
-            print(query)
-
-            start_date, end_date = get_category_date_range(time_range)
-
-            transactions = get_category_transactions(
-                db=db,
-                user_id=From,
-                category=category,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            if not transactions:
-                response.message(
-                    f"No {category} expenses found"
-                    + (
-                        f" {time_range.replace('_', ' ')}."
-                        if time_range != "all"
-                        else "."
-                    )
-                )
-
-                return Response(
-                    content=str(response),
-                    media_type="application/xml",
-                )
-
-            lines = [
-                f"Your {category} expenses"
-                + (
-                    f" ({time_range.replace('_', ' ')})"
-                    if time_range != "all"
-                    else ""
-                )
-                + ":"
-            ]
-
-            total = Decimal("0")
-
-            for transaction in transactions:
-                total += transaction.amount
-
-                date_text = (
-                    transaction.transaction_date.strftime("%d %b")
-                    if transaction.transaction_date
-                    else "Unknown date"
-                )
-
-                purpose_text = transaction.purpose or "No purpose"
-
-                if transaction.person:
-                    lines.append(
-                        f"• ₹{transaction.amount:.2f} — "
-                        f"{purpose_text} — {transaction.person} — {date_text}"
-                    )
-                else:
-                    lines.append(
-                        f"• ₹{transaction.amount:.2f} — "
-                        f"{purpose_text} — {date_text}"
-                    )
-
-            lines.append("")
-            lines.append(f"Total: ₹{total:.2f}")
-
-            response.message("\n".join(lines))
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # TOTAL EXPENSES
-        # --------------------------------------------------
-
-        if intent == "total_expenses":
-
-            total = get_total_expenses(
-                db=db,
-                user_id=From,
-            )
-
-            response.message(
-                f"You've spent ₹{total:.2f} so far."
-            )
-
-            print("Total expenses:", total)
-            print("Twilio response:")
-            print(str(response))
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-            
-        # --------------------------------------------------
-        # TOTAL INCOME
-        # --------------------------------------------------
-
-        if intent == "total_income":
-
-            total = get_total_income(
-                db=db,
-                user_id=From,
-            )
-
-            response.message(
-                f"You've earned ₹{total:.2f} so far."
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # TODAY INCOME
-        # --------------------------------------------------
-
-        if intent == "today_income":
-
-            total = get_today_income(
-                db=db,
-                user_id=From,
-            )
-
-            response.message(
-                f"You've earned ₹{total:.2f} today."
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # WEEKLY INCOME
-        # --------------------------------------------------
-
-        if intent == "week_income":
-
-            start_date, end_date = get_this_week_range()
-
-            transactions = get_income_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            total = sum(
-                transaction.amount
-                for transaction in transactions
-            )
-
-            response.message(
-                f"You've earned ₹{total:.2f} this week."
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # MONTHLY INCOME
-        # --------------------------------------------------
-
-        if intent == "month_income":
-
-            start_date, end_date = get_this_month_range()
-
-            transactions = get_income_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            total = sum(
-                transaction.amount
-                for transaction in transactions
-            )
-
-            response.message(
-                f"You've earned ₹{total:.2f} this month."
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # TODAY TOTAL
-        # --------------------------------------------------
-
-        if intent == "today_total":
-
-            today = get_today()
-
-            transactions = get_transactions_by_date(
-                db=db,
-                user_id=From,
-                transaction_date=today,
-            )
-
-            total = sum(
-                transaction.amount
-                for transaction in transactions
-            )
-
-            response.message(
-                f"You've spent ₹{total:.2f} today."
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # TODAY TRANSACTIONS
-        # --------------------------------------------------
-
-        if intent == "today_transactions":
-
-            today = get_today()
-
-            transactions = get_transactions_by_date(
-                db=db,
-                user_id=From,
-                transaction_date=today,
-            )
-
-            if not transactions:
-
-                response.message(
-                    "You haven't recorded any expenses today."
-                )
-
-                return Response(
-                    content=str(response),
-                    media_type="application/xml",
-                )
-
-            lines = ["Today's expenses:"]
-
-            total = 0
-
-            for transaction in transactions:
-
-                person = transaction.person or "Unknown"
-                purpose = transaction.purpose or "Unspecified"
-
-                lines.append(
-                    f"₹{transaction.amount:.2f} → "
-                    f"{person} — {purpose}"
-                )
-
-                total += transaction.amount
-
-            lines.append("")
-            lines.append(f"Total: ₹{total:.2f}")
-
-            response.message("\n".join(lines))
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # YESTERDAY TOTAL
-        # --------------------------------------------------
-
-        if intent == "yesterday_total":
-
-            start_date, end_date = get_yesterday_range()
-
-            transactions = get_expenses_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            total = sum(
-                transaction.amount
-                for transaction in transactions
-            )
-
-            response.message(
-                f"You've spent ₹{total:.2f} yesterday."
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # YESTERDAY TRANSACTIONS
-        # --------------------------------------------------
-
-        if intent == "yesterday_transactions":
-
-            start_date, end_date = get_yesterday_range()
-
-            transactions = get_expenses_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            response.message(
-                format_transactions(
-                    transactions,
-                    "Yesterday's expenses:",
-                )
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # THIS WEEK TOTAL
-        # --------------------------------------------------
-
-        if intent == "week_total":
-
-            start_date, end_date = get_this_week_range()
-
-            transactions = get_expenses_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            total = sum(
-                transaction.amount
-                for transaction in transactions
-            )
-
-            response.message(
-                f"You've spent ₹{total:.2f} this week."
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # THIS WEEK TRANSACTIONS
-        # --------------------------------------------------
-
-        if intent == "week_transactions":
-
-            start_date, end_date = get_this_week_range()
-
-            transactions = get_expenses_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            response.message(
-                format_transactions(
-                    transactions,
-                    "This week's expenses:",
-                )
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-            
-        # --------------------------------------------------
-        # MONTHLY SUMMARY
-        # --------------------------------------------------
-        if intent == "monthly_summary":
-            start_date, end_date = get_this_month_range()
-
-            summary = get_monthly_summary(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            expenses = summary["expenses"]
-            income = summary["income"]
-            balance = summary["balance"]
-            categories = summary["categories"]
-
-            lines = [
-                "📊 Monthly Summary",
-                "",
-                f"Total income: ₹{income:.2f}",
-                f"Total expenses: ₹{expenses:.2f}",
-                f"Net balance: ₹{balance:.2f}",
-            ]
-
-            if categories:
-                lines.append("")
-                lines.append("Top spending categories:")
-
-                for item in categories[:5]:
-                    lines.append(
-                        f"• {item['category'].capitalize()}: "
-                        f"₹{item['amount']:.2f}"
-                    )
-
-            response.message("\n".join(lines))
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # THIS MONTH TOTAL
-        # --------------------------------------------------
-
-        if intent == "month_total":
-
-            start_date, end_date = get_this_month_range()
-
-            transactions = get_expenses_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            total = sum(
-                transaction.amount
-                for transaction in transactions
-            )
-
-            response.message(
-                f"You've spent ₹{total:.2f} this month."
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # THIS MONTH TRANSACTIONS
-        # --------------------------------------------------
-
-        if intent == "month_transactions":
-
-            start_date, end_date = get_this_month_range()
-
-            transactions = get_expenses_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            response.message(
-                format_transactions(
-                    transactions,
-                    "This month's expenses:",
-                )
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # LAST MONTH TOTAL
-        # --------------------------------------------------
-
-        if intent == "last_month_total":
-
-            start_date, end_date = get_last_month_range()
-
-            transactions = get_expenses_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            total = sum(
-                transaction.amount
-                for transaction in transactions
-            )
-
-            response.message(
-                f"You've spent ₹{total:.2f} last month."
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # LAST MONTH TRANSACTIONS
-        # --------------------------------------------------
-
-        if intent == "last_month_transactions":
-
-            start_date, end_date = get_last_month_range()
-
-            transactions = get_expenses_between(
-                db=db,
-                user_id=From,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-            response.message(
-                format_transactions(
-                    transactions,
-                    "Last month's expenses:",
-                )
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # RECENT TRANSACTIONS
-        # --------------------------------------------------
-
-        if intent == "recent_transactions":
-
-            transactions = get_transactions(
-                db=db,
-                user_id=From,
-                limit=5,
-            )
-
-            if not transactions:
-
-                response.message(
-                    "You don't have any transactions recorded yet."
-                )
-
-                return Response(
-                    content=str(response),
-                    media_type="application/xml",
-                )
-
-            lines = ["Recent transactions:"]
-
-            for transaction in transactions:
-
-                person = transaction.person or "Unknown"
-                purpose = transaction.purpose or "Unspecified"
-
-                if transaction.transaction_type == "income":
-
-                    if person:
-                        lines.append(
-                            f"₹{transaction.amount:.2f} "
-                            f"received from {person}"
-                            f" — {purpose}"
-                        )
-                    else:
-                        lines.append(
-                            f"₹{transaction.amount:.2f} "
-                            f"received — {purpose}"
-                        )
-
-                else:
-
-                    if person:
-                        lines.append(
-                            f"₹{transaction.amount:.2f} "
-                            f"paid to {person}"
-                            f" — {purpose}"
-                        )
-                    else:
-                        lines.append(
-                            f"₹{transaction.amount:.2f} "
-                            f"— {purpose}"
-                        )
-
-            response.message("\n".join(lines))
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # UNKNOWN INTENT
-        # --------------------------------------------------
-
-        if intent == "unknown":
-
-            response.message(
-                "I can record expenses and show your spending. "
-                "Try something like 'Paid ₹500 to Rahul' "
-                "or 'How much did I spend?'"
-            )
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # CASE 3: New transaction
-        # --------------------------------------------------
-
-        transaction = extract_transaction(Body)
-
-        print("LLM transaction:")
-        print(transaction.model_dump())
-
-        missing = get_missing_fields(transaction)
-
-        print("Missing fields:")
-        print(missing)
-
-        # --------------------------------------------------
-        # Some fields are missing
-        # --------------------------------------------------
-
-        if missing:
-
-            first_missing = missing[0]
-
-            save_pending(
-                db,
-                From,
-                transaction,
-                first_missing,
-            )
-
-            if first_missing == "person":
-
-                if transaction.transaction_type == "income":
-                    response.message("Who did you receive this from?")
-                else:
-                    response.message("Who did you pay?")
-
-            elif first_missing == "purpose":
-
-                if transaction.transaction_type == "income":
-                    response.message("What was this income for?")
-                else:
-                    response.message("What was the purpose?")
-
-            print("Twilio response:")
-            print(str(response))
-
-            return Response(
-                content=str(response),
-                media_type="application/xml",
-            )
-
-        # --------------------------------------------------
-        # Complete transaction received in one message
-        # --------------------------------------------------
-
-        saved_transaction = save_transaction(
-            db=db,
-            user_id=From,
-            transaction=transaction,
-        )
-
-        # --------------------------------------------------
-        # Confirmation message
-        # --------------------------------------------------
-
-        if transaction.transaction_type == "income":
-
-            if transaction.person:
-                message = (
-                    f"Recorded ₹{transaction.amount} "
-                    f"received from {transaction.person}"
-                )
-            else:
-                message = (
-                    f"Recorded ₹{transaction.amount} received"
-                )
-
-        else:
-
-            if transaction.person:
-                message = (
-                    f"Recorded ₹{transaction.amount} "
-                    f"paid to {transaction.person}"
-                )
-            else:
-                message = (
-                    f"Recorded ₹{transaction.amount}"
-                )
-
-        if transaction.purpose:
-            message += f" for {transaction.purpose}"
-
-        message += "."
-
-        response.message(message)
-
-        print("Saved to database:")
-        print(f"Transaction ID: {saved_transaction.id}")
-
-        print("Completed transaction:")
-        print(transaction.model_dump())
-
-        print("Twilio response:")
-        print(str(response))
-
-        return Response(
-            content=str(response),
-            media_type="application/xml",
-        )
-
-    except Exception as e:
-
+            category = extract_category_query(Body)
+        elif intent == "category_list_query":
+            category = extract_category_list_query(Body)
+        reply = query_reply(db, From, intent, category)
+        if reply is not None:
+            return xml_reply(reply)
+        if intent != "transaction":
+            return xml_reply("I can record expenses and show your spending. Try 'Paid ₹500 for lunch', 'show my budgets', or 'undo last'.")
+
+        transactions = await run_in_threadpool(extract_transactions, Body)
+        logger.info("LLM transactions: %s", len(transactions))
+        missing = [get_missing_fields(item) for item in transactions]
+        if len(transactions) > 1 and any(missing):
+            if not claim_processed_webhook(db, From, MessageSid):
+                return xml_reply("That message was already processed.")
+            return xml_reply("I found multiple transactions, but need more details for at least one. Please send each transaction in a separate message so I can ask follow-up questions.")
+        if missing[0]:
+            save_pending(db, From, transactions[0], missing[0][0])
+            if not claim_processed_webhook(db, From, MessageSid):
+                return xml_reply("That message was already processed.")
+            question = "What was this income for?" if transactions[0].transaction_type == "income" else "What was the purpose?"
+            return xml_reply(question)
+        return xml_reply(record_reply(db, From, transactions, MessageSid))
+    except ExtractionUnavailable as exc:
         db.rollback()
-
-        print("ERROR:", repr(e))
-
-        response.message(
-            "Sorry, I couldn't process that transaction. "
-            "Please try again."
-        )
-
-        print("Twilio error response:")
-        print(str(response))
-
-        return Response(
-            content=str(response),
-            media_type="application/xml",
-        )
-
+        return xml_reply(str(exc))
+    except Exception:
+        db.rollback()
+        logger.exception("Could not process webhook %s", MessageSid)
+        return xml_reply("Sorry, I couldn't process that transaction. Please try again.")
     finally:
         db.close()

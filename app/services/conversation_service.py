@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -58,6 +59,14 @@ def get_pending(
     )
 
     if not state:
+        return None
+
+    updated_at = state.updated_at
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - updated_at > timedelta(hours=24):
+        db.delete(state)
+        db.commit()
         return None
 
     transaction = Transaction.model_validate(

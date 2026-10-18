@@ -1,0 +1,7 @@
+# Install CPU PyTorch separately first; see README's local GLiNER2 setup.
+-r requirements.txt
+gliner2[local]==2.1.0
+transformers>=4.43,<6
+sentencepiece>=0.2,<1
+protobuf>=5,<8
+dateparser>=1.2,<2

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from datetime import date, datetime, time
 
-from app.db.models import TransactionDB
+from app.db.models import TransactionDB, ImportedTransaction, RecurringExecution
 from app.schemas.transaction import Transaction
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -15,6 +15,8 @@ def save_transaction(
     db: Session,
     user_id: str,
     transaction: Transaction,
+    *,
+    commit: bool = True,
 ) -> TransactionDB:
 
     db_transaction = TransactionDB(
@@ -29,10 +31,48 @@ def save_transaction(
     )
 
     db.add(db_transaction)
-    db.commit()
-    db.refresh(db_transaction)
+    if commit:
+        db.commit()
+        db.refresh(db_transaction)
+    else:
+        db.flush()
 
     return db_transaction
+
+
+def get_user_transaction(db: Session, user_id: str, transaction_id: int):
+    return db.query(TransactionDB).filter_by(user_id=user_id, id=transaction_id).first()
+
+
+def delete_user_transaction(db: Session, user_id: str, transaction_id: int | None = None):
+    query = db.query(TransactionDB).filter_by(user_id=user_id)
+    if transaction_id is not None:
+        query = query.filter(TransactionDB.id == transaction_id)
+    transaction = query.order_by(TransactionDB.created_at.desc(), TransactionDB.id.desc()).first()
+    if transaction is None:
+        return None
+    deleted = {field: getattr(transaction, field) for field in (
+        "id", "transaction_type", "amount", "currency", "person", "purpose", "category", "transaction_date"
+    )}
+    db.query(ImportedTransaction).filter_by(transaction_id=transaction.id).delete()
+    db.query(RecurringExecution).filter_by(transaction_id=transaction.id).update({"transaction_id": None})
+    db.delete(transaction)
+    db.commit()
+    return deleted
+
+
+def get_totals_by_currency(db, user_id, transaction_type, start_date=None, end_date=None, category=None):
+    query = db.query(TransactionDB.currency, func.sum(TransactionDB.amount)).filter(
+        TransactionDB.user_id == user_id,
+        TransactionDB.transaction_type == transaction_type,
+    )
+    if start_date is not None:
+        query = query.filter(TransactionDB.transaction_date >= start_date)
+    if end_date is not None:
+        query = query.filter(TransactionDB.transaction_date <= end_date)
+    if category is not None:
+        query = query.filter(TransactionDB.category == category)
+    return {currency: Decimal(str(total)) for currency, total in query.group_by(TransactionDB.currency).all()}
 
 
 def get_transactions(
@@ -276,63 +316,20 @@ def get_category_transactions(
     ).all()
     
 def get_monthly_summary(db, user_id, start_date, end_date):
-    expense_transactions = get_expenses_between(
-        db=db,
-        user_id=user_id,
-        start_date=start_date,
-        end_date=end_date,
-    )
-
-    income_transactions = get_income_between(
-        db=db,
-        user_id=user_id,
-        start_date=start_date,
-        end_date=end_date,
-    )
-
-    expenses = sum(
-        transaction.amount
-        for transaction in expense_transactions
-    )
-
-    income = sum(
-        transaction.amount
-        for transaction in income_transactions
-    )
-
-    category_rows = (
-        db.query(
-            TransactionDB.category,
-            func.coalesce(func.sum(TransactionDB.amount), 0),
-        )
-        .filter(
+    expenses = get_totals_by_currency(db, user_id, "expense", start_date, end_date)
+    income = get_totals_by_currency(db, user_id, "income", start_date, end_date)
+    currencies = {}
+    for currency in sorted(expenses.keys() | income.keys()):
+        categories = db.query(TransactionDB.category, func.sum(TransactionDB.amount)).filter(
             TransactionDB.user_id == user_id,
             TransactionDB.transaction_type == "expense",
+            TransactionDB.currency == currency,
             TransactionDB.transaction_date >= start_date,
             TransactionDB.transaction_date <= end_date,
-        )
-        .group_by(TransactionDB.category)
-        .order_by(
-            func.sum(TransactionDB.amount).desc()
-        )
-        .all()
-    )
-
-    categories = [
-        {
-            "category": category or "other",
-            "amount": (
-                amount
-                if isinstance(amount, Decimal)
-                else Decimal(str(amount))
-            ),
+        ).group_by(TransactionDB.category).order_by(func.sum(TransactionDB.amount).desc()).all()
+        spent, earned = expenses.get(currency, Decimal("0")), income.get(currency, Decimal("0"))
+        currencies[currency] = {
+            "income": earned, "expenses": spent, "balance": earned - spent,
+            "categories": [{"category": category or "other", "amount": amount} for category, amount in categories],
         }
-        for category, amount in category_rows
-    ]
-
-    return {
-        "expenses": expenses,
-        "income": income,
-        "balance": income - expenses,
-        "categories": categories,
-    }
+    return {"currencies": currencies}
