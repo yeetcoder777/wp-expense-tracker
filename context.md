@@ -887,3 +887,166 @@ path with Jev have not been established by this single check. The next useful
 check is restarting the backend and sending the equivalent query on WhatsApp,
 then inspecting the Jev provider log and the returned database-backed spending total.
 No secret values were collected or included in this handoff.
+
+## 21. Local GLiNER2 integration and real webhook checks — 18 October 2026
+
+### Request, scope, and current selection
+
+The user requested installing `gliner2-base` from Hugging Face, running it locally,
+and testing the WhatsApp application. All changes below were made in
+`D:\Siddhesh\Projects\expense-tracker - Copy`; the original checkout was not edited.
+Earlier sections describing Groq-only transaction extraction are historical.
+
+The active copy `.env` now selects **Jev for intent routing** and **local CPU
+GLiNER2 for transaction extraction, income/expense classification, and category
+classification**. Existing Jev configuration and secret values were preserved.
+This is not an entirely local/offline app: Jev, Twilio, the hosted database,
+existing query parsing, receipt vision, and configured fallback still use their
+existing services. No model fine tuning was performed.
+
+### Installation and model
+
+- Existing `venv` uses Python 3.15, for which compatible PyTorch wheels were not
+  available at installation time. Kept that environment intact.
+- Installed Python 3.12.10 using the Python install manager (`py install 3.12`).
+- Created separate `.venv-gliner` in the copy and installed CPU PyTorch from
+  `https://download.pytorch.org/whl/cpu`, followed by app/local requirements.
+- Added `requirements.local.txt`, including `requirements.txt`,
+  `gliner2[local]==2.1.0`, Transformers >=4.43,<6, SentencePiece >=0.2,<1,
+  protobuf >=5,<8, and dateparser >=1.2,<2. `pip check` passed.
+- Added `.venv-gliner/` to `.gitignore`. Model weights remain in the user's
+  Hugging Face cache outside the repository.
+- Downloaded and loaded `fastino/gliner2-base-v1` (205M parameters) on CPU, pinned
+  to revision `f9634218e53580c56edf0de97ca1a7d3f1c2354e`.
+- Uses the official `gliner2.AutoExtractor` Python API with PyTorch and
+  Transformers underneath, rather than a generic Transformers pipeline.
+- Model download allows JSON/tokenizer/SentencePiece/safetensors files;
+  executable remote model code is not enabled.
+
+### Modular code changes
+
+1. `app/services/local_extraction_service.py` owns lazy optional imports,
+   pinned cached model loading, a reusable CPU model, load/inference locks,
+   entity descriptions and fixed category/type labels, source-span validation,
+   confidence checks, Decimal amounts, currency checks, and deterministic dates.
+   It excludes pronouns like `I` from the merchant/person field.
+2. `app/services/transaction_extraction_service.py` selects the provider and
+   owns explicit Groq fallback. Strict local errors raise `ExtractionUnavailable`
+   with a useful clarification instead of silently writing guessed data.
+3. `app/services/llm_service.py`: preserved Groq logic as
+   `extract_transactions_groq()`; public `extract_transactions()` delegates to
+   the new provider service. Existing callers retain their interface.
+4. `app/api/webhook.py`: transaction extraction now runs through
+   `run_in_threadpool`; handles `ExtractionUnavailable` by rolling back and
+   replying with clarification. Existing intent routing, commands, pending
+   purpose flow, writes, budgets, and MessageSid protection remain in use.
+5. `app/main.py`: when local extraction is selected, load the model during
+   startup with `asyncio.to_thread` before serving requests. A failed local
+   startup fails clearly unless explicit Groq fallback is enabled.
+6. `app/config.py`: added validated provider, model/revision, cache-only,
+   confidence, CPU thread, and fallback settings. Groq remains the default when
+   `EXTRACTION_PROVIDER` is absent, preserving compatibility with the old venv.
+7. `.env.example` documents local options; copy `.env` enabled the local trial.
+   Original `.env` and existing credentials were not changed or printed.
+8. `scripts/smoke_test_backend.py` forces `EXTRACTION_PROVIDER=groq` for its
+   existing mocked offline tests, independent of the live `.env` selection.
+
+### Configuration now in the copy
+
+```dotenv
+EXTRACTION_PROVIDER=gliner2
+GLINER2_MODEL_ID=fastino/gliner2-base-v1
+GLINER2_REVISION=f9634218e53580c56edf0de97ca1a7d3f1c2354e
+GLINER2_LOCAL_FILES_ONLY=true
+GLINER2_ENTITY_THRESHOLD=0.4
+GLINER2_CLASSIFICATION_THRESHOLD=0.5
+GLINER2_NUM_THREADS=4
+GLINER2_FALLBACK_TO_GROQ=false
+```
+
+Cache-only true was enabled after the download. A fresh machine needs false
+for its first download. To revert extraction, set `EXTRACTION_PROVIDER=groq`
+and restart. Optional `GLINER2_FALLBACK_TO_GROQ=true` permits cloud extraction
+after a local error. The trial leaves extraction fallback disabled so a local
+success cannot secretly come from Groq. Jev's existing fallback is separate.
+
+### Constraints and validation
+
+- Accepts up to 20 transactions separated by newline or semicolon, with each
+  segment at most 500 characters. All segments must validate before saving.
+- Requires an explicit positive numeric amount, at most two decimals. Rejects
+  ambiguous amounts, `2k`/lakh/crore-style abbreviations, negative amounts,
+  multiple currencies, and extra numeric values outside recognized dates.
+- Supported explicit currencies: INR, USD, EUR, GBP. Missing currency uses INR.
+- English relative dates use Asia/Kolkata; numeric dates use DMY. Explicit
+  today/yesterday/tomorrow and numeric date patterns are recovered even if the
+  entity model misses them. Other missed date wording remains a model limitation.
+- Low category confidence becomes `other`; uncertain income/expense is declined.
+- Missing purpose follows the existing pending transaction flow.
+- Span/shape checks cannot prove semantic correctness. English examples passed;
+  Hinglish and broad accuracy have not been evaluated.
+- One shared model serializes inference. Multiple workers use more memory;
+  concurrent throughput and production deployment were not load-tested.
+
+### Scripts and evidence
+
+- Added `scripts/test_local_extractor.py`: **19 passing regression tests**, using
+  fabricated outputs without loading weights. Covers normalization, relative
+  dates and missed date entities, malformed/mismatched spans, confidence,
+  currency ambiguity, amounts/precision, missing purpose, provider selection,
+  strict local behavior, and explicit fallback.
+- Existing `scripts/smoke_test_backend.py`: **40 passing tests** in the new
+  environment. Total across the two commands: **59 passing tests**.
+- Added `scripts/check_local_extractor.py`: real local inference, `--repeat` for
+  warm timings, and `--webhook` for temporary SQLite webhook integration.
+  `--live-intent` additionally uses real Jev with classifier fallback disabled.
+  The checker blocks Groq completion calls, verifies saved fields and retry
+  protection, disposes the test database, and never sends outbound messages.
+- Real model checks succeeded for coffee, salary, yesterday, full calendar date,
+  groceries, Uber, missing purpose, and a two-line coffee/salary batch. A line
+  containing separate tea and lunch amounts was declined.
+- Real Jev plus real local GLiNER2 webhook tests returned HTTP 200, saved the
+  expected coffee entry and two-line expense/income batch, and blocked duplicate
+  MessageSid delivery. These used temporary SQLite; no synthetic test entries
+  were added to the real database.
+- First coffee check: about 20.1 seconds including imports/loading; next run:
+  about **538 ms**. Cold live-intent webhook checks: about 15–19 seconds including
+  local load. These few examples are not a benchmark or a Groq comparison.
+  Production startup preload removes model loading from the first message path.
+- Both `scripts/check_whatsapp_connection.py` checks passed after starting the
+  new server: local route/health and public ngrok health. The configured `.env`
+  callback matched the current tunnel callback. No actual phone-originated
+  WhatsApp message or Twilio delivery was verified by these automated checks.
+
+### Running server and next step
+
+Stopped the existing copy-folder Python 3.15 Uvicorn reloader and its remaining
+worker, which held port 8000 after the parent exited. Started the copy's backend
+using `.venv-gliner` Python 3.12 on **127.0.0.1:8000** with no reload flag.
+Its log confirmed `Local extractor ready`, `Application startup complete`, and
+Uvicorn listening. The existing ngrok tunnel was retained and public health passed.
+
+This helper-started process runs hidden, with ignored logs:
+`gliner-backend.stdout.log` and `gliner-backend.stderr.log` in the copy. If it
+is still running, stop it before starting another backend on the same port.
+The recurring worker still follows normal application startup behavior.
+
+For future manual startup, from the **copy**:
+
+```powershell
+.\.venv-gliner\Scripts\Activate.ps1
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Wait for startup to finish; keep ngrok targeting port 8000. Send a message from
+the user's phone such as `I spent ₹250 on coffee` or `Received ₹65,000 salary`.
+Use separate lines for multiple entries. Inspect `provider=gliner2` extraction
+logs and the reply. Those phone messages will create real records; undo/delete
+trial entries afterward if desired. Actual phone delivery remains the next
+manual check, not an already established result.
+
+Updated `README.md`, this handoff, and `docs/PROJECT_EXPLAINED.md`. Added
+`docs/LOCAL_GLINER2.md` with installation, startup, model behavior, settings,
+tests, examples, rollback, measured timings, and limitations.
+Official sources checked: https://huggingface.co/fastino/gliner2-base-v1 and
+https://github.com/fastino-ai/GLiNER2.

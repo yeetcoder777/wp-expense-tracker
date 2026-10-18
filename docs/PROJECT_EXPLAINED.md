@@ -2,7 +2,9 @@
 
 This guide describes the implementation in `expense-tracker - Copy`.
 Jev intent classification is integrated with a configurable Groq fallback.
-A TypeSafe API key is still needed to activate real Jev calls; extraction uses Groq.
+A TypeSafe API key is needed for Jev. The copy now selects local GLiNER2 for
+transaction extraction and category classification; Groq remains selectable.
+See section 19 and [the local setup guide](LOCAL_GLINER2.md).
 
 Read sections 1–5 first to understand the application. Then read the feature
 explanations and interview examples.
@@ -26,7 +28,7 @@ out a form. The backend turns that sentence into a validated database record.
 **A short interview introduction:**
 
 > I built a WhatsApp expense tracker with a web dashboard. FastAPI handles the
-> requests, Groq interprets natural-language messages, and SQLAlchemy saves data
+> requests, Jev routes messages, local GLiNER2 extracts transaction fields, and SQLAlchemy saves data
 > in a relational database. I added transaction corrections, budgets, reports,
 > recurring payments, and reviewed imports. I focused on validation, keeping
 > users' records separate, and preventing duplicate writes when messages retry.
@@ -44,6 +46,8 @@ out a form. The backend turns that sentence into a validated database record.
 | SQLite | A lightweight database | Temporary storage for automated tests |
 | Twilio | Connects WhatsApp to the backend | Incoming messages, replies, notifications |
 | Groq API | Runs the configured AI model | Intent classification and data extraction |
+| Jev / TypeSafe SDK | Chooses a fixed intent label | Routes natural-language requests |
+| GLiNER2 / PyTorch / Transformers | Runs a small encoder locally | Transaction entities and category/type classification |
 | HTML, CSS, JavaScript | The browser interface | Dashboard forms, tables, spending bars |
 | Fetch API | Sends browser HTTP requests | Dashboard calls to the backend |
 | asyncio | Runs background work during app lifetime | Recurring schedule polling |
@@ -115,7 +119,8 @@ is `detect_intent()` in `app/services/llm_service.py`.
 }
 ```
 
-The current function is `extract_transactions()` in the same service.
+The public function is `extract_transactions()` in `llm_service.py`; it delegates
+to `transaction_extraction_service.py` to select the local or Groq implementation.
 
 **Validation checks the extracted values.** Pydantic checks rules such as a
 positive amount, at most two decimal places, and an allowed transaction type.
@@ -125,7 +130,8 @@ Valid structure alone cannot prove that the model understood the sentence.
 check budgets, and save or update records. Those operations are controlled by code.
 
 In the current implementation, classification can use Jev or Groq.
-Groq continues to handle transaction and category/time-range extraction.
+Transaction extraction can use GLiNER2 or Groq. Existing category/time-range
+query parsing still uses its existing Groq paths.
 Predictable commands such as `cancel` and `edit last amount to 300` use ordinary
 Python and regular expressions before intent classification.
 
@@ -151,7 +157,7 @@ Incoming message
                        |
                        +-- Report intent -> SQL/service -> formatted reply
                        |
-                       +-- Transaction intent -> Groq extracts fields
+                       +-- Transaction intent -> GLiNER2 or Groq extracts fields
                                                 -> Pydantic -> database
 ```
 
@@ -168,9 +174,9 @@ from transaction saving and report calculation.
 
 Jev calls use the official `typesafe-sdk`, model `jev-1.14.0` by default,
 a configurable HTTP-operation timeout, and no SDK retries. The webhook dispatches
-classification to a threadpool so the synchronous provider call does not block
-its async event loop. Other synchronous database/extraction work still needs
-future concurrency improvements.
+classification and transaction extraction to a thread pool so synchronous model
+calls do not block its async event loop. Synchronous database work and other
+query parsing still need future concurrency improvements.
 
 Configure the copy folder's `.env`:
 
@@ -219,8 +225,9 @@ wrong routes, latency, and cost. No improvement figures are claimed for this app
 
 > I separated intent classification from field extraction. Jev uses typed Choice
 > labels to select the user's intent. I validate its label and check confidence,
-> with a configurable Groq fallback on errors or uncertainty. Groq still extracts
-> fields, and ordinary Python and SQL handle financial calculations and persistence.
+> with a configurable Groq fallback on errors or uncertainty. Local GLiNER2 now
+> extracts transaction fields and categories, and ordinary Python and SQL handle
+> financial calculations and persistence.
 
 ## 6. How the code is organized
 
@@ -515,7 +522,7 @@ Twilio's saved callback; that must be configured on the correct sender/Sandbox.
 
 ## 18. Honest boundaries and next steps
 
-- Jev classification is implemented; actual Jev calls require a TypeSafe key. Groq handles extraction and optional classifier fallback.
+- Jev classification is implemented; actual Jev calls require a TypeSafe key. Local GLiNER2 handles transaction extraction when selected; Groq supports the original extraction and optional fallback.
 - Deletion is permanent; undo currently removes the latest transaction.
 - Dashboard access uses one configured user's bearer token.
 - Background scheduling depends on the backend process being alive.
@@ -528,6 +535,44 @@ Twilio's saved callback; that must be configured on the correct sender/Sandbox.
 First practice the message flow and the classification/extraction distinction.
 Then explain one feature using its input, validation, database change, and output.
 Finally, explain one failure case and the test or constraint that addresses it.
+
+## 19. How local GLiNER2 works
+
+Think of Jev as choosing **which operation** to perform and GLiNER2 as selecting
+**which words contain the transaction's data**. For `Spent 250 INR on coffee`,
+GLiNER2 identifies an amount span (`250 INR`) and a purpose span (`coffee`), and
+classifies the type as expense and the category as food.
+
+The code checks that each extracted span matches the original message, parses
+money using `Decimal`, resolves dates deterministically, and validates the final
+`Transaction` with Pydantic. A small amount of date/currency parsing uses regular
+expressions. SQLAlchemy and the existing services still own database writes.
+
+This is **zero-shot schema-based extraction**, not a model trained on our expense
+data. Labels and descriptions guide a pretrained 205M parameter encoder. It runs
+on CPU through `gliner2.AutoExtractor`, PyTorch, and Transformers, with model
+weights downloaded from Hugging Face at a pinned revision.
+
+`local_extraction_service.py` owns model loading, schemas, source checks, and
+normalization. `transaction_extraction_service.py` owns provider selection and
+fallback. The API continues calling the same public extraction function.
+This keeps ML dependencies separate from the rest of the app.
+
+The model loads once at startup and is reused. Inference runs outside the async
+event loop; a lock prevents simultaneous use of the shared model. This favors a
+simple local deployment, but serial inference limits throughput.
+
+One warm coffee extraction took about 538 ms; cold loading took about 20 seconds.
+Those are observations from one example, not an accuracy or speed comparison
+against Groq. Real Jev plus GLiNER2 webhook tests passed for coffee and a two-line
+coffee/salary batch, using a temporary database and checking duplicate retries.
+There are 19 additional local regression tests alongside the existing 40.
+
+The app still needs network access for Twilio, Jev, the hosted database, and
+other configured Groq paths. Local extraction does not make the whole app offline.
+Use explicit numeric amounts and one transaction per line; ambiguous entries
+are declined when local fallback is disabled. Read [LOCAL_GLINER2.md](LOCAL_GLINER2.md)
+for installation, real test commands, configuration, and current limitations.
 
 ## Official Jev references
 
