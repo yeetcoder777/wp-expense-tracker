@@ -1,6 +1,14 @@
+> **Directory update:** Python source, scripts, requirements and private configuration now live in `backend/`. Run Python commands below from `backend/`; the existing `venv` is at the project root. Read the [current startup guide](../README.md) first. References to the old root `.env` mean `backend/.env`. Docker Compose runs from the project root and uses `backend/Dockerfile`. Older sections are retained as historical context.
+
 # Local GLiNER2 experiment
 
 Implemented on 18 October 2026 in **expense-tracker - Copy**.
+
+**Current setup update:** the user removed Python 3.15, created a Python 3.12.10
+`venv`, and merged dependencies into `requirements.txt`. The separate
+`.venv-gliner`/`requirements.local.txt` setup described in the installation history
+below is no longer required. Use `venv` and the merged requirements. Dashboard
+access now uses [individual WhatsApp sign-in](MULTI_USER_DASHBOARDS.md).
 
 ## What runs where?
 
@@ -40,7 +48,7 @@ as `.venv-gliner`. The existing environment was retained.
 From `D:\Siddhesh\Projects\expense-tracker - Copy`:
 
 ```powershell
-.\.venv-gliner\Scripts\Activate.ps1
+.\venv\Scripts\Activate.ps1
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -100,7 +108,7 @@ python scripts/check_local_extractor.py --webhook --live-intent "I spent 250 INR
 python scripts/check_whatsapp_connection.py
 ```
 
-Run these using `.venv-gliner`. The local regression tests use fabricated model
+Run these using your current Python 3.12 `venv`. The local regression tests use fabricated model
 responses and do not load weights. The last extractor command uses **real Jev**,
 **real GLiNER2**, and an isolated temporary SQLite database. It verifies saved
 fields and duplicate delivery protection. Without `--live-intent`, the webhook

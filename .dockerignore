@@ -16,3 +16,12 @@ __pycache__/
 .vscode/
 .idea/
 node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Backend secrets and nested Python artifacts after directory split
+**/.env
+**/.env.*
+**/__pycache__/
+**/*.py[cod]
+backend/logs/

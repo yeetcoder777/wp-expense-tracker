@@ -1,6 +1,9 @@
+> **Directory update:** Python source, scripts, requirements and private configuration now live in `backend/`. Run Python commands below from `backend/`; the existing `venv` is at the project root. Read the [current startup guide](../README.md) first. References to the old root `.env` mean `backend/.env`. Docker Compose runs from the project root and uses `backend/Dockerfile`. Older sections are retained as historical context.
+
 # Expense Tracker: Simple Technical Guide
 
-This guide describes the implementation in `expense-tracker - Copy`.
+This guide describes the implementation in `expense-tracker - Copy`, including
+the per-user WhatsApp dashboard sign-in added on 18 October 2026.
 Jev intent classification is integrated with a configurable Groq fallback.
 A TypeSafe API key is needed for Jev. The copy now selects local GLiNER2 for
 transaction extraction and category classification; Groq remains selectable.
@@ -371,12 +374,21 @@ The API uses familiar HTTP operations:
 | PATCH | Change selected fields | Correct an amount |
 | DELETE | Remove a record | Delete a transaction |
 
-The dashboard sends a bearer token in the `Authorization` header. The backend
-checks it with `hmac.compare_digest` and binds requests to `DASHBOARD_USER_ID`.
-The browser stores the token in session storage.
+Each person now signs in by proving ownership of their WhatsApp number.
+The browser requests a login challenge, then the user sends its command to the
+bot. The backend validates Twilio's signature and checks that the sender is the
+requested number. A separate browser-only secret claims a short-lived session.
 
-This is a simple dashboard for one configured account. Registration, JWT login,
-role permissions, and a full multi-user account system are future improvements.
+An HttpOnly cookie identifies that session. The database stores only its hash,
+expiry, and account relationship. Every financial API derives the WhatsApp
+identity from that session; changing a record ID cannot change its owner.
+Existing sender-based records need no reassignment. Signing out revokes the
+session and clears displayed financial data.
+
+There are three new tables: `dashboard_users`, `dashboard_login_challenges`, and
+`dashboard_sessions`. This is passwordless WhatsApp authentication using opaque
+server sessions, not JWT login or a shared admin token. Read
+[MULTI_USER_DASHBOARDS.md](MULTI_USER_DASHBOARDS.md) for setup and production limits.
 
 ## 12. Recurring payments and reminders
 
@@ -524,7 +536,7 @@ Twilio's saved callback; that must be configured on the correct sender/Sandbox.
 
 - Jev classification is implemented; actual Jev calls require a TypeSafe key. Local GLiNER2 handles transaction extraction when selected; Groq supports the original extraction and optional fallback.
 - Deletion is permanent; undo currently removes the latest transaction.
-- Dashboard access uses one configured user's bearer token.
+- Dashboard accounts use WhatsApp proof and expiring sessions; new auth flows still need runtime and isolation testing before public launch.
 - Background scheduling depends on the backend process being alive.
 - Tables are created at startup; existing schema changes need migrations.
 - Model output validation checks structure and rules, not factual understanding.
@@ -584,3 +596,8 @@ Application-specific accuracy and performance have not been benchmarked.
 - [Choice questions](https://docs.typesafe.ai/primitives/choice)
 - [Intent routing](https://docs.typesafe.ai/patterns/intent-routing)
 - [Confidence and probabilities](https://docs.typesafe.ai/confidence)
+
+
+## TanStack Query and dashboard caching
+
+Read [TanStack Query explained](TANSTACK_QUERY_EXPLAINED.md) for the notebook analogy, current implementation, technical details and interview preparation.

@@ -21,3 +21,10 @@ venv/
 
 # Logs
 *.log
+frontend/node_modules/
+frontend/dist/
+
+# Track templates only; real environment files stay ignored at every depth.
+!backend/.env.example
+!frontend/.env.example
+backend/logs/

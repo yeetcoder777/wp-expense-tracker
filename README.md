@@ -1,179 +1,111 @@
 # WhatsApp Expense Tracker
 
-For the full Codex change history, current implementation, setup, tests, and
-continuation notes, read [context.md](context.md).
+A React dashboard and FastAPI backend for private WhatsApp-linked expense tracking.
 
-For a simple technical walkthrough and interview preparation, read
-[Project explained](docs/PROJECT_EXPLAINED.md), including the Jev classifier integration.
+## Directory structure
 
-A personal expense tracker with a Twilio WhatsApp webhook and a small web dashboard. The dashboard and API are bound to one configured WhatsApp user; the existing webhook continues to identify users from Twilio's `From` field.
+```text
+expense-tracker - Copy/
+  frontend/                React app, npm dependencies, charts and pages
+    src/
+    public/
+    legacy/                Original dashboard used when React is not built
+    package.json
+  backend/                 Python application and configuration
+    app/                   APIs, services, schemas and database models
+    scripts/               Checks, migrations and regression scripts
+    .env                   Private configuration (ignored by Git and Docker)
+    .env.example           Configuration template
+    requirements.txt       Backend and local GLiNER2 dependencies
+    requirements.sweepr.txt
+    create_tables.py
+    test_intent.py
+    Dockerfile
+    README.md
+  docs/                    Shared architecture, model and authentication guides
+  compose.yaml             Builds and runs the complete app
+  context.md               Full development history and handoff context
+  venv/                    Existing local Python environment (ignored)
+```
 
-## Features
+## Run locally
 
-- Record expenses and income through WhatsApp, and ask for totals, transaction lists, category totals, and monthly summaries.
-- Cancel a pending transaction with `cancel`. Correct records with `edit <id> amount to 500`, `edit <id> date to 2026-10-11`, or `edit <id> category to food`; use `last` instead of an ID. Delete with `delete <id>` or `delete last`; undo with `undo last`.
-- Set and inspect monthly budgets through WhatsApp: `Set my food budget to ₹8,000`, `Set my overall budget to ₹20,000`, and `show my budgets`. Budget alerts are returned when a new expense reaches 80% and 100% of a budget.
-- Review and edit transactions, view monthly and custom-range reports, compare with the previous calendar month, inspect savings rate and largest expenses, and export transactions as CSV in the dashboard.
-- Create weekly, monthly, or yearly recurring items. Choose reminders or automatic transaction recording.
-- Preview and import bank statement CSVs and receipt images. CSV rows are reviewed before import and possible duplicates are unchecked by default. Receipt extraction uses a configured vision model and always requires review before import.
-- Twilio message IDs are recorded with transactions to prevent webhook retries from creating duplicates. Twilio signatures are required in production when `TWILIO_AUTH_TOKEN` is configured.
-- Select Jev or Groq for intent classification. Select local GLiNER2 or Groq for transaction extraction and category classification.
+### Backend terminal
 
-## Local GLiNER2 experiment
-
-The copy now uses `fastino/gliner2-base-v1` locally for transaction extraction,
-while Jev handles intent classification. Use the separate Python 3.12 environment:
+From this project's root, activate the existing environment and enter backend/:
 
 ```powershell
-.\.venv-gliner\Scripts\Activate.ps1
+.\venv\Scripts\Activate.ps1
+cd backend
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Wait for model loading and `Application startup complete`. Stop any existing
-server on port 8000 first. See [the local model guide](docs/LOCAL_GLINER2.md) for
-installation, settings, actual test results, WhatsApp examples, and limitations.
-The generic setup below uses Groq by default; local extraction additionally needs
-`requirements.local.txt` and a compatible Python environment.
+Wait for `Application startup complete`. Health: http://127.0.0.1:8000/health
 
-## Setup
+For a fresh environment, run `python -m venv .venv`, activate it, and run
+`python -m pip install -r backend/requirements.txt` from the project root.
+Copy `backend/.env.example` to `backend/.env` only on a new checkout; do not
+overwrite existing credentials. Backend configuration now lives in `backend/.env`.
 
-Use Python 3.10 or newer.
+### Frontend terminal
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
-```
-
-Set the required `GROQ_API_KEY` and `DATABASE_URL`. The database tables are created when the app starts; `python create_tables.py` is also available for explicit setup.
-
-Set `DASHBOARD_API_TOKEN` to a long random secret and `DASHBOARD_USER_ID` to the exact Twilio WhatsApp sender value, such as `whatsapp:+91...`. The dashboard asks for the token and holds it in browser session storage. Dashboard endpoints only return data for that configured user.
-
-For inbound WhatsApp messages, set the Twilio webhook to:
-
-```text
-https://<your-host>/webhook/whatsapp
-```
-
-Set `TWILIO_AUTH_TOKEN` and the exact public callback URL in `TWILIO_WEBHOOK_URL` to validate signatures. Production mode refuses webhook requests when signature validation has not been configured. To send scheduled WhatsApp reminders, also set `TWILIO_ACCOUNT_SID` and `TWILIO_WHATSAPP_FROM`.
-
-Receipt image import is optional. Set `GROQ_VISION_MODEL` to a vision-capable model available to your Groq account. Without it, bank CSV import and all other features remain available.
-
-## Jev intent classification
-
-The integration uses the official `typesafe-sdk==0.7.5`. Install requirements,
-create a key in the [TypeSafe console](https://console.typesafe.ai/), and set:
-
-```dotenv
-INTENT_CLASSIFIER=jev
-TYPESAFE_API_KEY=your_typesafe_key
-JEV_MODEL=jev-1.14.0
-JEV_TIMEOUT_SECONDS=4
-JEV_MIN_CONFIDENCE=0.6
-JEV_FALLBACK_TO_GROQ=true
-```
-
-Restart the backend after editing `.env`. The code defaults to Groq if no provider
-is configured; the supplied example selects Jev. A blank TypeSafe key with fallback
-enabled uses Groq, so that configuration does not prove a live Jev integration call.
-
-Jev selects among the existing 21 intent labels. It does not extract arbitrary
-amounts, descriptions, or receipt fields in this application. Groq remains required
-for those operations and category/time-range extraction. Explicit commands and
-pending conversation answers bypass AI intent classification.
-
-Missing keys, SDK errors/timeouts, invalid responses, and confidence below the
-configured minimum fall back to Groq. Set `JEV_FALLBACK_TO_GROQ=false` to decline
-with the `unknown` route instead. The 0.6 threshold is a configurable starting
-policy, not a measured accuracy guarantee. SDK retries are disabled for this call;
-the timeout controls HTTP operations. Classification runs in FastAPI's threadpool.
-
-To verify a real Jev call with fallback disabled, from the project root run:
+From this project's root:
 
 ```powershell
-python scripts/check_intent_classifier.py --strict-jev "How much did I spend this month?"
+cd frontend
+npm ci
+npm run dev
 ```
 
-This sends the supplied text to the provider but writes no database records.
-Expect `provider: "jev"` and a supported label such as `month_total`. A missing
-key or declined response exits nonzero with a reason, rather than disguising a
-Groq fallback as Jev success. Credentials should be edited locally, not pasted
-into chat. For an offline check, run the full smoke suite or:
+Open http://127.0.0.1:5173/ . Vite proxies /api to backend port 8000.
+Use the same hostname throughout login. [Frontend setup](frontend/README.md)
+explains proxy and origin configuration. Financial data is cached per account
+and filters. The read-only preview is available without signing in.
+
+## Docker
+
+Run from the project root:
 
 ```powershell
-python scripts/test_intent_classifier.py
+docker compose up -d --build backend
 ```
 
-References: [official SDK](https://docs.typesafe.ai/sdk/python),
-[Choice](https://docs.typesafe.ai/primitives/choice),
-[confidence](https://docs.typesafe.ai/confidence).
+Compose uses `backend/Dockerfile` with the project root as its build context,
+loads `backend/.env` at runtime, builds React, and serves it through FastAPI on
+http://127.0.0.1:8000/ . Backend secrets are excluded from the build context.
+The named GLiNER model-cache volume is unchanged. Stop a competing local backend
+before using the same host port. No Docker operations were run for this restructure.
 
-Reports keep currencies separate; the app does not convert between currencies. Receipt uploads are reviewed in the dashboard before they are saved. WhatsApp image messages are directed to the dashboard instead of being imported automatically.
+For a direct image build use `docker build -f backend/Dockerfile -t expense-tracker:local .`.
 
-The recurring-payment worker starts with the FastAPI application and checks schedules every minute. PostgreSQL row locks prevent multiple app workers from processing the same schedule at once; for SQLite, run one app worker.
+## Backend scripts
 
-Start the app:
-
-```powershell
-python -m uvicorn app.main:app --reload
-```
-
-Open `http://127.0.0.1:8000/` for the dashboard. API documentation is available at `/docs`.
-
-## Troubleshooting WhatsApp delivery
-
-Keep the backend and `ngrok http 8000` running in separate terminals. Then run:
+Python helper commands now run from backend/:
 
 ```powershell
+cd backend
 python scripts/check_whatsapp_connection.py
-```
-
-This checks the local route, discovers the current ngrok HTTPS URL, prints the
-complete callback to save in Twilio, and checks public backend health. It does
-not send a WhatsApp message or create a transaction. Set the printed callback
-in Twilio's incoming-message webhook field using POST. The `.env` setting
-`TWILIO_WEBHOOK_URL` is used for signature verification; it does not configure
-Twilio's callback. If ngrok shows no incoming WhatsApp POST, check the callback
-on the correct sender or Sandbox and confirm your phone has joined that Sandbox.
-
-The backend logs `Webhook arrived` before form and signature validation, followed
-by the HTTP status. A 403 indicates signature rejection; a 422 indicates missing
-or invalid form fields. Neither status means the request failed to reach the app.
-
-Run the isolated backend regression checks with:
-
-```powershell
+python scripts/check_intent_classifier.py --strict-jev "How much did I spend this month?"
 python scripts/smoke_test_backend.py
 ```
 
-These use a temporary SQLite database and simulated Groq responses. The suite checks
-expense/income entry, multiple entries, missing-purpose follow-ups, cancellation,
-edits, deletion, undo, invalid inputs, budgets and threshold alerts, date-based
-queries, income queries, monthly summaries, category queries, currency separation,
-user isolation, webhook retries, media guidance, signature validation, and database
-driver selection. It does not contact Twilio or modify your real database, and does
-not measure live Groq intent/extraction accuracy or actual WhatsApp delivery.
-The combined suite now has 40 tests, including Jev SDK transport/response checks,
-confidence boundaries, configuration validation, failure fallback/strict mode,
-and webhook tests proving that Groq still extracts fields while reports can use
-Jev intent routing followed by SQL alone. No real provider APIs are called by tests.
+The smoke command is documented for you to run; it was not executed as part of
+the directory move. Keep ngrok pointed at backend port 8000 and Twilio pointed
+at the public `/webhook/whatsapp` URL. API paths and database schema are unchanged.
 
-## Bank CSV format
+## Guides
 
-The importer recognizes common header names for date, description, amount, debit, credit, type, currency, category, and person. A basic file can use:
+- [Backend features, configuration and script reference](backend/README.md)
+- [React frontend](frontend/README.md)
+- [Technical explanation](docs/PROJECT_EXPLAINED.md)
+- [Multi-user dashboards](docs/MULTI_USER_DASHBOARDS.md)
+- [Local GLiNER2](docs/LOCAL_GLINER2.md)
+- [Complete development context](context.md)
 
-```csv
-date,description,amount,type,currency,category
-2026-10-01,Groceries,1250.00,debit,INR,food
-2026-10-05,Salary,65000.00,credit,INR,salary
-```
+Historical commands in context.md describe earlier layouts; use the current
+structure section at the top of that file and this README for startup paths.
 
-If a single amount column has no type, rows default to expenses. For income, include a type column (`credit`/`income`) or separate credit and debit columns. Dates accept ISO format and common day/month/year formats.
 
-## Application layout
+## TanStack Query and dashboard caching
 
-- `app/api/`: WhatsApp webhook and dashboard API routes.
-- `app/services/`: transaction, report, budget, import, notification, and recurring-payment logic.
-- `app/db/`: SQLAlchemy models and database session setup.
-- `app/static/`: dashboard HTML, CSS, and JavaScript.
+Read [TanStack Query explained](docs/TANSTACK_QUERY_EXPLAINED.md) for the notebook analogy, current implementation, technical details and interview preparation.

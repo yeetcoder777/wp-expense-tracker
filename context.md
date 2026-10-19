@@ -1,12 +1,15 @@
 # Expense Tracker — Codex Handoff Context
 
-Last updated: **17 October 2026**, Asia/Calcutta.
+Last updated: **19 October 2026**, Asia/Calcutta.
 
-**Latest status:** Jev intent classification is now implemented with configurable
-Groq fallback. Extraction stays on Groq. The combined offline suite passes 40 tests.
-The user has now verified a real strict-mode Jev call: `month_total`, provider
-`jev`, confidence `1.0`, and no fallback. Section 20 records the evidence;
-section 19 describes the implementation and supersedes the earlier proposal history.
+**Latest status:** The active copy now has separate frontend/ and backend/
+directories. The React dashboard uses a reversed dark navy/light porcelain theme,
+larger typography, an approximately 18% wider sidebar and account-scoped TanStack
+Query caching with manual Refresh. Backend code, settings, scripts and Dockerfile
+reside in backend/. Read section 0 for the authoritative current state, then the
+preserved history for implementation and debugging details. The separate
+[TanStack guide](docs/TANSTACK_QUERY_EXPLAINED.md) explains caching and interview
+preparation.
 
 This document gives another ChatGPT conversation or developer the context needed
 to continue this project. It records the requested features, implemented code,
@@ -14,6 +17,243 @@ debugging history, tests, configuration changes, limitations, and next steps.
 Descriptions below reflect the current source, rather than every intermediate
 version of a file. No passwords, access tokens, API keys, or database credentials
 are included.
+
+## 0. Authoritative current snapshot
+
+This section supersedes historical paths, UI/auth descriptions and setup commands.
+All earlier sections are preserved for full development history. Historical
+verification does not mean the latest source was retested.
+
+### 0.1 Correct workspace and user preferences
+
+- Active project: `D:\Siddhesh\Projects\expense-tracker - Copy`.
+- Original: `D:\Siddhesh\Projects\expense-tracker`. Do not edit it for this work.
+- Original-folder restoration described later is historical evidence. Its present Git state was not rechecked during this documentation update.
+- User wants clean modular code, concrete setup instructions and simple technical explanations suitable for interviews.
+- User asked to learn/run Docker themselves. No image builds, pushes or deployments should be performed without subsequent authorization.
+- Preserve secret configuration; never include credentials in documentation or Vite variables.
+- Do not add/run tests unless asked. Distinguish source inspection, mocked tests, live provider checks and production verification.
+
+### 0.2 Current structure and path translations
+
+```text
+expense-tracker - Copy/
+  frontend/
+    src/
+      api/client.js
+      auth/AuthContext.jsx, SignIn.jsx
+      components/Charts.jsx, TransactionsTable.jsx, UI.jsx
+      hooks/useLedger.js
+      pages/Overview.jsx, Transactions.jsx, Budgets.jsx, Recurring.jsx, Imports.jsx
+      data/demo.js
+      lib/format.js
+      App.jsx, main.jsx, styles.css
+    public/ledger.svg
+    legacy/                 Original HTML/CSS/JS fallback
+    package.json, package-lock.json, vite.config.js, README.md
+    .env.example
+    dist/                   Generated React build, ignored
+    node_modules/           Installed dependencies, ignored
+  backend/
+    app/                    APIs, services, DB, schemas, settings
+    scripts/                Checks, migrations, regression scripts
+    .env                    Private configuration, moved without changing values
+    .env.example
+    requirements.txt        Merged backend and GLiNER2 dependencies
+    requirements.sweepr.txt  Existing alternative requirements file
+    create_tables.py, test_intent.py
+    Dockerfile, README.md
+    logs/                   Ignored GLiNER stdout/stderr
+  docs/                     Shared explanations and setup guides
+  compose.yaml              Root build context, backend/Dockerfile, backend/.env
+  README.md, context.md
+  .gitignore, .dockerignore
+  high level architecture diagram.png
+  venv/                     Existing local Python environment retained in place
+```
+
+Old paths in history translate as follows:
+
+| Historical path | Current path |
+| --- | --- |
+| app/... | backend/app/... |
+| scripts/... | backend/scripts/... |
+| .env and .env.example at root | backend/.env and backend/.env.example |
+| requirements*.txt at root | backend/requirements*.txt |
+| Dockerfile at root | backend/Dockerfile |
+| app/static/... | frontend/legacy/... |
+
+Shared docs/, frontend/ and root compose.yaml remain at their existing level.
+The Python module is still app.main:app, launched from backend/. Root venv was
+kept because moving an existing virtual environment can break absolute paths.
+
+### 0.3 Architecture and provider boundaries
+
+```text
+WhatsApp -> Twilio -> POST /webhook/whatsapp
+                      -> signature / commands / login proof / idempotency
+                      -> Jev or Groq intent classification
+                      -> GLiNER2 or Groq extraction when needed
+                      -> Pydantic -> services -> SQLAlchemy/database
+                      -> TwiML reply / configured outbound WhatsApp messages
+
+React -> TanStack Query -> same-origin /api/* -> cookie authentication
+                                              -> same scoped services/database
+
+Receipt image -> Groq vision -> validation -> editable preview -> confirmation
+FastAPI lifespan -> local model warmup + recurring asyncio worker
+```
+
+- Modular monolith, not a set of microservices. Source separation does not create separate databases or auth systems.
+- User's current local Python setup is 3.12.10 with merged requirements. Python 3.15 and separate .venv-gliner/requirements.local.txt entries below describe earlier stages.
+- Jev is remote intent classification, not general transaction extraction. The user demonstrated a successful strict Jev check.
+- Local CPU model uses official gliner2.AutoExtractor, fastino/gliner2-base-v1 and a pinned revision. It was not implemented as transformers.pipeline.
+- Compose explicitly sets EXTRACTION_PROVIDER=gliner2, allows model downloads and disables Groq extraction fallback. Pydantic defaults are Groq unless overridden. Do not confuse source defaults, .env values and container overrides.
+- GLiNER2 does not read receipt images. Groq still serves explicitly configured vision and other Groq-specific paths.
+- SQLAlchemy maps unqualified PostgreSQL URLs to psycopg2. Database credentials are private. Decimal/NUMERIC remain authoritative for financial calculations; currencies are kept separate.
+
+### 0.4 Current implemented features and limits
+
+| Feature | Current behavior | Limit |
+| --- | --- | --- |
+| WhatsApp transactions | Income/expenses, multiple entries, summaries, SQL totals/lists | Interpretation depends on selected provider and extractor constraints |
+| Corrections | Edit/delete by ID or last, undo last, cancel pending input | Undo deletes latest entry, not an edit/recovery history |
+| Budgets | Monthly overall/category/currency budgets, 80%/100% thresholds | Outbound delivery requires Twilio and is not guaranteed by recording alerts |
+| Reports | Month/custom range, previous month, savings rate, largest expenses | No currency conversion |
+| React UI | Overview, Transactions, Budgets, Recurring, Imports | Latest browser/auth end-to-end verification incomplete |
+| Transaction review | 25-row pagination, filters, edit/delete/undo | Search is current-page only; CSV export supports dates/currency |
+| Recurring | Weekly/monthly/yearly, reminders or auto-record, pause/resume/delete | In-process worker stops with app; no durable queue |
+| Bank CSV | UTF-8 aliases, 10 MB / 2,000 rows, editable preview, duplicate flags and confirm | Not universal bank/PDF/Excel parsing |
+| Receipt images | JPEG/PNG/WebP, 10 MB, vision extraction capped at 50 entries, review | Requires actual supported Groq vision model; live import not verified |
+| Private accounts | WhatsApp proof, browser challenge, polling, HttpOnly session | Requires verified incoming webhook and matching unexpired challenge |
+| Explicit preview | Labeled illustrative read-only account | No protected writes/imports/exports or auth bypass |
+| Query caching | Freshness/retention, shared queries, invalidation, Refresh | Memory-only, no instant WhatsApp push |
+
+Receipt configuration: during the earlier inspection GROQ_VISION_MODEL was
+missing/empty. The user later selected placeholder text
+`<a Groq model supporting image input>` in the editor. That is not a valid model
+ID. This documentation update did not inspect secret values or verify a live
+vision provider. Receipt operation remains conditional on correct configuration.
+
+### 0.5 React redesign, colors, typography and sidebar
+
+- React/Vite application lives in frontend/. Uses TanStack Query v5, Lucide icons, self-hosted DM Sans and Cormorant Garamond. package.json holds ranges; package-lock.json holds resolved packages.
+- Original minimal porcelain/navy/brass design was reversed at the user's request. Current canvas/cards are dark navy, text is light; net-position and sign-in story panels are light with navy text.
+- Main current tokens: canvas #101922, surface #18232d, text #e1e8ee, brass #cbb580, income #91c9ad, error #edaaa4.
+- Explicit font sizes increased approximately 16%; explicit labels have a 12px floor and inputs a 16px base. Responsive overrides remain and can set individual mobile sizes differently.
+- Updated controls, dialogs, hover states, chart track/series, wrapping and mobile table overflow for the new colors/type sizes. Retained visible focus and reduced-motion handling.
+- Sidebar widened approximately 18%: normal/mobile drawer 228px -> 269px; intermediate breakpoint 210px -> 248px. Desktop content offsets match; mobile main content stays at zero offset.
+- Hash navigation, responsive drawer and controlled sign-in phone input remain. Preview is explicit, never silently substituted after backend errors.
+- Overview uses actual monthly aggregates and previous-month bars, not invented daily balances. Imports require review/selection before saving.
+
+### 0.6 TanStack Query follow-up update
+
+Full explanation: [TanStack Query explained](docs/TANSTACK_QUERY_EXPLAINED.md).
+
+- One QueryClient at module scope in frontend/src/main.jsx, shared through QueryClientProvider.
+- staleTime=5 minutes; gcTime=30 minutes after inactivity. Window-focus and reconnect refetch enabled.
+- useLedgerQuery keys data by [account_id, resource, params], gates automatic requests using user/enabled, passes AbortSignal to the API helper and disables ledger automatic retries.
+- Fresh same-key requests reuse data. Stale cached data can remain visible while refreshed on mount, focus or reconnect. Crossing staleTime alone does not start a request.
+- Successful useLedgerMutation changes invalidate the account prefix. Import confirmation separately does equivalent invalidation. Active matches refresh; inactive matches become stale. No optimistic cache writes/rollback flow.
+- Header Refresh invalidates account data. useIsFetching tracks matching requests and disables Refresh while busy.
+- Account accept/logout/session expiration cancels queries and clears cache. Cache is memory-only, not persisted in localStorage, and not shared between browser tabs.
+- HTTP no-store remains in API fetches/backend responses; application-memory caching is separate from HTTP caching.
+- WhatsApp updates appear on Refresh or eligible revalidation. No polling interval, server revision endpoint, SSE, WebSocket or cross-tab query synchronization was added.
+- Before this update, ledger staleTime was 30 seconds and default inactive retention applied. Those values are historical.
+- No measured latency/request reduction percentage is available. This avoids requests; it does not speed up individual SQL or model operations.
+
+### 0.7 Current auth and privacy versus historical shared tokens
+
+- Current default uses WhatsApp authentication and HttpOnly SameSite=Strict cookies, with production Secure handling. Early bearer token/sessionStorage descriptions are historical legacy behavior.
+- Legacy mode is explicit development compatibility. Backend authentication/ownership checks enforce isolation; cache keys only help prevent UI mix-ups.
+- Additive auth models: DashboardUser, DashboardLoginChallenge and DashboardSession. Financial user IDs remain WhatsApp sender identities.
+- New auth tables get PostgreSQL RLS and revoked browser-role grants. Existing financial grants were not automatically rewritten.
+- Automatic approval review rejected an earlier broad existing-table grant rewrite; it never executed. Current production startup does a conservative read-only existing-table privacy check that can require operator review.
+- API helper sends X-Ledger-Request, checks X-Ledger-Account and handles structured errors/25-second timeout. Backend CSP and API no-store remain.
+- Repeated login/complete HTTP 202 indicates pending approval. Check ngrok/Twilio delivery, signatures, number/browser match and challenge expiry.
+- Legacy phone input bug was a programmatic form-reset/filter/401 loop; its fix remains in frontend/legacy. React uses controlled state for the phone field.
+
+### 0.8 Current startup, environment and Docker
+
+Backend terminal, starting at the copy root:
+
+```powershell
+.\venv\Scripts\Activate.ps1
+cd backend
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Frontend terminal, starting at the root:
+
+```powershell
+cd frontend
+npm ci
+npm run dev
+```
+
+- Vite: http://127.0.0.1:5173/; health: http://127.0.0.1:8000/health; API docs: /docs.
+- Backend settings resolve backend/.env relative to config.py, independent of current working directory. Do not create another secret-bearing root/frontend .env copy.
+- Optional frontend/.env.local can set API_PROXY_TARGET for another backend port and public VITE_WHATSAPP_NUMBER for the convenience link. VITE_ variables are public.
+- Vite forwards /api to :8000. DASHBOARD_PUBLIC_URL must match the browser origin or be unset for inferred dev origin. Keep localhost/127.0.0.1 consistent.
+- Run ngrok http 8000. Twilio must POST to the current public HTTPS URL plus /webhook/whatsapp. Setting .env does not update Twilio Console.
+- Python helpers now run from backend/: python scripts/check_whatsapp_connection.py; python scripts/check_intent_classifier.py; python scripts/check_local_extractor.py; python scripts/smoke_test_backend.py. These are instructions, not new execution claims.
+
+Docker commands from the root, for the user to run:
+
+```powershell
+docker compose up -d --build backend
+docker compose logs -f backend
+```
+
+Compose uses root build context, backend/Dockerfile and backend/.env. Retains
+127.0.0.1:8000 publication and named gliner-model-cache volume. Dockerfile uses a
+Node build stage and Python workdir /app/backend, with built React assets at
+/app/frontend/dist and fallback at /app/frontend/legacy. Final runtime does not
+include Node/node_modules. Nested secrets/artifacts are excluded from build context.
+
+Direct image command: docker build -f backend/Dockerfile -t expense-tracker:local .
+A rebuild/restart is needed for changed source; existing containers are unchanged.
+FastAPI selects React dist if present at startup. Existing dist may predate latest
+cache/theme changes until rebuilt. Restart old local Python processes at new paths.
+
+### 0.9 Verification ledger: do not overstate completion
+
+| Work | Recorded evidence | Not established by that evidence |
+| --- | --- | --- |
+| Initial feature expansion | Historical isolated SQLite/mocked checks | Current live database/Twilio behavior |
+| Jev | Historical 40-test combined suite, user strict Jev output | Guaranteed current provider availability/latency |
+| GLiNER2 | Historical 19 extractor checks, 40 smoke checks, selected live inference/webhook checks | All languages/inputs or new auth/React coverage |
+| Multi-user auth | Source implemented; older smoke configuration kept legacy-compatible | New real-user login fully verified |
+| Initial React | npm installation/build passed; preview root HTTP 200 | Screenshot review or working real-user session |
+| Cache/theme/sidebar updates | Source edits/review | Fresh production build, browser regression or benchmark |
+| Directory split | Python AST syntax and git whitespace inspection | Live app import/startup, image rebuild or migration |
+| This documentation update | Cross-checked current source/history | Any new test/provider/deployment result |
+
+Browser visual review was blocked by unavailable automation/URL verification.
+No screenshots were verified. Temporary preview helpers were stopped. Recent
+review did not perform real imports or prove CSV/receipt end-to-end behavior.
+
+The user separately built/ran Docker earlier and attempted Hub pushes, reporting
+upload timeouts/retries with existing layers. Do not claim Codex published an
+image or that the latest source was pushed. Older free-hosting research is dated,
+not a verified current deployment plan. No public deployment is established.
+
+### 0.10 Guide map and next work
+
+- README.md: current folders, startup and Docker instructions.
+- backend/README.md: detailed backend configuration/features/scripts, relative to backend/.
+- frontend/README.md: proxy/auth-origin setup, UI scope, build and cache notes.
+- docs/PROJECT_EXPLAINED.md: project architecture/interview reference.
+- docs/LOCAL_GLINER2.md: local model integration and earlier evidence.
+- docs/MULTI_USER_DASHBOARDS.md: login, privacy boundary and deployment considerations.
+- docs/TANSTACK_QUERY_EXPLAINED.md: notebook analogy, exact hooks/settings, trade-offs and interview Q&A.
+- Sections 1-24 below retain full prior feature/debugging history, followed by later changes under section 24.
+
+Outstanding before claiming public readiness: verify real-user login and account
+ownership; review existing Supabase exposure; configure a real vision model if
+needed; rebuild assets/container; verify webhook/import/recurring flows with
+appropriate authorization. These are remaining verification/setup items, not
+work completed during this documentation refresh.
 
 ## 1. Read this first: the correct working folder
 
@@ -71,6 +311,8 @@ They subsequently requested debugging help, complete message-flow tests, an
 interview explanation, an assessment of Jev for classification, and this handoff.
 
 ## 3. Current architecture and stack
+
+> **Historical scope:** Original overview before Jev/local extraction and React. Section 0 describes current architecture.
 
 The application is a **modular monolith**, with a WhatsApp interface and a static
 browser dashboard sharing backend services.
@@ -220,6 +462,8 @@ How much is left in my food budget?
   summaries are supported through the query service.
 
 ### 4.6 Web dashboard
+
+> **Historical scope:** Initial plain-JavaScript/shared-token dashboard. React and WhatsApp cookie sessions supersede this UI. Legacy files now live in frontend/legacy/.
 
 - Served by FastAPI at `/` from `app/static/`.
 - Responsive HTML/CSS and plain JavaScript; category bars are HTML/CSS.
@@ -384,6 +628,8 @@ year/month and currency. There is no general transaction POST endpoint; entry
 creation currently comes through WhatsApp, confirmed imports, or recurring execution.
 
 ## 8. File inventory and responsibilities
+
+> **Historical scope:** Inventory before directory separation. Section 0 gives current paths.
 
 ### Existing files updated in the copy
 
@@ -555,6 +801,8 @@ The real copy `.env` was not replaced with the example file.
 
 ## 11. Configuration reference
 
+> **Historical scope:** Early settings. Current auth/providers and backend/.env location are in section 0 and backend/app/config.py.
+
 Settings currently load `.env` relative to the process working directory. Run
 commands from the copy root to avoid using the wrong file.
 
@@ -585,6 +833,8 @@ ngrok's host can change; use the currently active tunnel rather than an old URL.
 Do not put production secret values or full personal sender details in this document.
 
 ## 12. Running and testing from the correct folder
+
+> **Historical scope:** Commands before the split. Use section 0.8 and README.md; run Python from backend/.
 
 Backend terminal:
 
@@ -681,6 +931,8 @@ prove semantic correctness; confidence is not guaranteed accuracy. No real-model
 accuracy or application-specific latency/cost improvement has been measured.
 
 ## 15. Known limitations and sensible next work
+
+> **Historical scope:** Historical assessment; section 0 and later implementation supersede completed items.
 
 These should be explained honestly in another chat or interview:
 
@@ -1050,3 +1302,370 @@ Updated `README.md`, this handoff, and `docs/PROJECT_EXPLAINED.md`. Added
 tests, examples, rollback, measured timings, and limitations.
 Official sources checked: https://huggingface.co/fastino/gliner2-base-v1 and
 https://github.com/fastino-ai/GLiNER2.
+
+
+## 22. Individual dashboards and deployment guidance — 18 October 2026
+
+### User changes since the local model experiment
+
+The user reported uninstalling Python 3.15, creating a Python 3.12.10 `venv`, and
+merging backend/local dependencies into `requirements.txt`. The active copy
+contains this merged file; separate `.venv-gliner` setup is historical.
+
+The user created Dockerfile, Compose, and ignore files themselves using guidance.
+They ran the Docker backend successfully after switching their Supabase direct
+IPv6 connection to the IPv4-capable Session pooler. Logs they provided showed
+GLiNER2 ready and application startup complete. They attempted to push
+`siddheshtodi/expense-tracker:v1` to Docker Hub, but the provided logs showed
+registry commit timeouts; a successful final push was not established here.
+These actions were user-performed, not a deployment run by Codex.
+
+### Current request and implemented flow
+
+The user asked for each user to have their own dashboard and for free deployment
+options. All code edits were made in `expense-tracker - Copy`; the original
+checkout was not edited. Current workspace permissions required reviewed access
+to the copy path. No credentials were read into output or changed.
+
+The new default is `DASHBOARD_AUTH_MODE=whatsapp`. Everyone uses the same dashboard
+URL and bot number but proves control of their own WhatsApp account:
+
+1. Enter an international phone number in the dashboard.
+2. Backend issues a random login command and a separate browser polling secret.
+3. Send the command to the bot from that exact WhatsApp number.
+4. A signature-verified Twilio callback approves the challenge before pending
+   purpose handling or AI classification.
+5. Only the originating browser, holding its separate secret, can claim the
+   challenge and obtain an HttpOnly session cookie.
+6. Financial APIs resolve that cookie to its account's WhatsApp identity.
+
+No passwords, email provider, Supabase Auth keys, or extra auth dependencies are
+needed. WhatsApp messaging still incurs provider costs. Sandbox participants
+must join first. This is the app's own opaque-session authentication, not JWT.
+
+### Schema and code inventory
+
+- `app/db/models.py`: additive `DashboardUser`, `DashboardLoginChallenge`, and
+  `DashboardSession` models. Unique WhatsApp account identity, session-account FK,
+  challenge hashes/state/expiry, and lookup/expiry indexes.
+- Existing transaction/budget/import/recurring/conversation user IDs stay as
+  `whatsapp:+...`. First verified login creates a dashboard account and retains
+  that number's history; no financial records are rewritten or reassigned.
+- `app/schemas/dashboard_auth.py`: validated E.164 input, strict login request
+  bodies, challenge and account response schemas.
+- `app/services/dashboard_auth_service.py`: random codes and browser/session
+  secrets, SHA-256 hashes at rest, constant-time browser proof check, sender and
+  signature checks, expiry, account creation, one-time atomic claim, session
+  lookup/revocation, and database-count request limits. Concurrent account creation
+  uses a savepoint; conditional challenge consumption prevents double claims.
+- `app/api/auth.py`: routes `GET /api/auth/me`, `POST /api/auth/login/start`,
+  `POST /api/auth/login/complete` (202 while pending), `POST /api/auth/logout`.
+  Financial APIs continue using `require_dashboard_user`, now session-based.
+- SameSite=Strict, HttpOnly cookies, production Secure flag, custom request header,
+  and Origin checks for browser writes. Tokens are not exposed to JavaScript.
+- `app/api/webhook.py`: signature validator returns whether proof was verified.
+  Login commands are handled before pending transactions and AI; unsigned
+  development requests cannot approve logins. Malformed login commands return
+  guidance instead of becoming transaction purposes.
+- `app/main.py`: mounts account routes, adds no-store API responses, account marker
+  headers and browser security headers. Production refuses legacy shared-token
+  mode, explicitly insecure cookies, or absent Twilio validation. Database setup
+  happens before model loading. Swagger/ReDoc retain their normal CDN scripts.
+- `app/static/dashboard-auth.js`: own-number login UI, WhatsApp link and copy
+  command, bounded polling, automatic existing session lookup, and sign out.
+- `index.html`, `dashboard.js`, `dashboard.css`: replaced token modal, hid financial
+  content until login, cleared old data/forms/previews/toasts on logout or account
+  change, aborted stale requests, and checked response account IDs across tabs.
+- `app/config.py` and `.env.example`: new auth mode, session hours (default 24),
+  challenge minutes (default 5), public dashboard origin, optional cookie Secure
+  setting. Existing `.env` untouched. Old token/user settings only work in explicit
+  development `legacy` mode; the new UI uses WhatsApp mode.
+- `scripts/smoke_test_backend.py`: its existing offline environment explicitly
+  selects `legacy` so historical API-token checks retain their meaning. No new
+  tests were added or run. This is not coverage of the new account flow.
+
+### Database setup, permission review and safety boundary
+
+Added `app/services/database_setup_service.py` and
+`scripts/migrate_dashboard_accounts.py`. They create missing tables, protect only
+three new authentication tables with PostgreSQL RLS and revoked browser grants,
+and preserve existing financial data and permissions. New tables and protection
+are committed together. Existing startup schema creation is routed through this
+setup, which also works without PostgreSQL-specific DDL on SQLite.
+
+Automatic approval review rejected an earlier planned startup/migration rewrite
+that would revoke PUBLIC/anon/authenticated privileges across existing tables.
+Reason: broad persistent permission changes could disrupt other Supabase clients
+and were not specifically authorized. That command never executed. The safer
+implementation changes only new auth table permissions. Existing financial table
+privileges were deliberately left untouched.
+
+Production adds a read-only check for existing Supabase browser access: grants
+without RLS or ambiguous existing policies stop startup with table names requiring
+operator review. It is intentionally conservative and not a full policy verifier.
+Any migration changing existing clients' grants needs a separate explicit review
+and approval. No live database migration or grant changes were performed here.
+Use a server-only DB role that owns the tables and a correct Session pooler URL.
+
+### Operator actions still needed
+
+Configure Twilio account auth token, correct bot number and exact callback URL.
+For production configure `ENVIRONMENT=production` and HTTPS
+`DASHBOARD_PUBLIC_URL`. Rebuild the Docker image/container to include the new code:
+
+```powershell
+docker compose up -d --build backend
+docker compose logs -f backend
+```
+
+For an explicit local migration with the activated Python 3.12 venv:
+
+```powershell
+python scripts/migrate_dashboard_accounts.py
+```
+
+Startup also applies the same additive setup. The migration requires table-owner
+privileges; production can stop for an existing-table privacy review. No Docker
+build/restart/push or public deployment was performed by Codex in this turn.
+
+### Hosting research and limits
+
+Checked official sources on 18 October 2026:
+
+- Oracle Always Free A1 currently documents 1,500 OCPU-hours / 9,000 GB-hours,
+  equivalent to 2 OCPUs / 12 GB RAM for Always Free tenancies. Plausible for a small
+  local-GLiNER2 pilot, subject to resource availability, limits and idle reclamation.
+  It is ARM64, so existing likely-AMD64 images require an appropriate rebuild and
+  dependency compatibility checks. No ARM build or cloud instance was verified.
+- Render Free: 512 MB / 0.1 CPU, idle sleep after 15 minutes, no persistent disk.
+  Unsuitable for the current local model. A Groq-extraction demo could be evaluated,
+  with cold-start, memory and scheduler limitations explicitly retained.
+- Current Hugging Face docs require a paid plan to create Docker/Gradio compute
+  Spaces; free static hosting cannot run this backend.
+- Free hosting does not remove Twilio messaging, external model, or database quota
+  costs. WhatsApp template/consent rules and durable reminder work still apply.
+
+Added `docs/MULTI_USER_DASHBOARDS.md` with onboarding, architecture, schema,
+configuration, migration/rebuild commands, privacy boundary, hosting sources,
+manual acceptance scenarios and unverified limits. Updated README,
+PROJECT_EXPLAINED, LOCAL_GLINER2 setup note and this context.
+
+### Validation status
+
+Source/diff review and whitespace checks only. No tests added/run and no live
+backend, migration, signed-phone login, browser UI, or cross-user isolation run.
+Previous 59-pass evidence belongs to the pre-account version. Before public use,
+verify at least two users, cross-user record IDs/exports/imports, wrong sender,
+forged signatures, expired/replayed codes, session expiry/logout and tab changes.
+The database-count login limits are best effort, not an atomic distributed limiter.
+Phone-number reassignment/recovery and broad model/concurrency evaluation remain
+operational considerations. The app is not being declared production-ready.
+
+
+## 23. Frontend phone input reset loop fixed — 18 October 2026
+
+The user reported that the dashboard would not accept typing and clarified that
+it was the WhatsApp number field. The running dashboard at 127.0.0.1:8000 was
+inspected in an isolated browser tab. The phone input was enabled, editable and
+focused, but its value immediately returned to empty after input.
+
+Cause: `showLogin()` dispatched `ledger:signedout`; `clearAccountData()` reset
+all financial forms; resetting `transaction-filters` fired its reset handler,
+which fetched transactions while signed out. That returned 401 and called
+`showLogin()` again, resetting the login form and repeating the cycle.
+
+Changes in the copy only:
+
+- `dashboard.js`: suppress filter reset side effects during programmatic account
+  cleanup with a `resettingForms` flag; skip filter reloads while signed out;
+  discard scheduled reloads from an old account epoch; refuse financial API calls
+  without an account; recheck account epoch after reading API error responses.
+- `dashboard-auth.js`: emit signed-out cleanup only when leaving a signed-in
+  account; preserve the entered phone on repeated sign-in errors; reset it only
+  for an explicit restart/logout or actual account transition; focus the phone
+  field when opening the login dialog.
+- Root cause identified and source/whitespace reviewed. No regression tests were
+  added or run. The running backend still served the old JavaScript when checked
+  after editing. The fixed UI has not yet been verified in a rebuilt container.
+- No Docker build/restart was performed, respecting the user's earlier request
+  to execute Docker commands themselves. They need to run
+  `docker compose up -d --build backend`, then hard-refresh the dashboard.
+
+No authentication bypass, database change, WhatsApp message, or credential change
+was made for this fix.
+
+
+## 24. Separate React finance dashboard — 19 October 2026
+
+### Request and scope
+
+The user explicitly invoked `$frontend-design` and requested a separate React JS
+frontend folder with a very minimal, appealing, luxurious finance appearance.
+Used that skill and the Sites local-only workflow. All changes are in
+`D:\Siddhesh\Projects\expense-tracker - Copy`; no original-folder edits,
+cloud Site registration, publishing, Docker commands, live database writes, or
+WhatsApp sends were performed. Existing user/backend changes were preserved.
+
+### Visual direction
+
+Chosen before implementation: porcelain canvas (#f6f7f9), white surfaces, navy
+(#172a3a), muted brass (#a18b5d), slate text, and restrained green for income.
+Cormorant Garamond headings/wordmark contrast with DM Sans body and tabular money.
+A quiet sidebar and one navy net-position panel establish hierarchy; no decorative
+gradient backgrounds or repeating animation system. Mobile navigation, visible
+focus styles, reduced motion support, and higher-contrast secondary text included.
+Fonts and icons are local build dependencies, not remote CDN resources.
+
+### Frontend structure and dependencies
+
+Added `frontend/` using React JS (.jsx), Vite, TanStack Query, Lucide icons,
+Fontsource fonts, and a local Prettier formatter. npm dependencies were installed;
+package.json uses actual installed version ranges and package-lock.json locks the
+resolved tree. Local Node was 24.21.0; package engines require >=22.12.0. The root
+project remains a Python backend; frontend tooling is isolated in this folder.
+
+- `src/api/client.js`: fetch/cookies, CSRF header, timeout/cancellation, structured
+  errors, session/account response checks, and CSV downloads.
+- `src/auth/`: session provider, sign-in screen with controlled phone input,
+  login creation, bounded polling, expiry, WhatsApp link/code copy, and sign out.
+  No imperative form reset or unauthenticated transaction-fetch loop.
+- `src/hooks/useLedger.js`: account-scoped queries, explicit preview responses,
+  protected mutations, and cache invalidation after changes.
+- `src/components/`: shared buttons, native dialogs, notifications, loading/error/
+  empty states, transaction table/category icons, and data-derived SVG/bar charts.
+- `src/pages/`: Overview, Transactions, Budgets, Recurring, and Imports.
+- `src/lib/format.js`: money/date display, month bounds, categories/colors.
+- `src/data/demo.js`: only the explicitly selected, read-only illustrative data.
+- `App.jsx`: sidebar, hash navigation, account identity, period/currency controls,
+  record-on-WhatsApp guidance, and preview banner.
+- `styles.css`: scoped visual system and mobile/desktop layouts; closed mobile
+  navigation is inert and keyboard focus enters navigation when opened.
+
+### API-connected behavior
+
+- Existing WhatsApp cookie-session endpoints stay authoritative. No shared token,
+  CORS broadening, auth bypass, new account store, or API credentials in React.
+- Overview uses monthly reports for income/spending/net/savings, previous-month
+  comparison, category spending, and largest expenses. Recent transactions are
+  fetched separately. Custom date-range reports remain available.
+- Movement chart compares the actual selected and previous calendar months; it
+  does not invent a daily balance series or claim to show a bank account balance.
+- Transactions support server-side date/type/category/currency filters and 25-row
+  pagination. Text search is explicitly within the current page. Edit amount/date/
+  category/purpose, delete, undo, and date-range CSV export use existing APIs.
+- CSV export honors dates and currency, which are the backend's supported export
+  filters; it does not falsely claim to honor text/type/category filters.
+- Budgets are current-month limits (including overall/category), with upsert,
+  deletion, progress and remaining/over-limit amounts. No sum of overlapping
+  overall/category budgets is shown as a misleading combined limit.
+- Recurring supports creation, pause/resume and deletion. Reminders vs auto-record
+  are explicit; the UI does not claim that Ledger actually moves bank funds.
+- CSV and receipt imports retain review before confirmation. Preview rows allow
+  editing and selection; possible duplicates start unselected and only explicitly
+  selected duplicates are included. Client limits uploads to 10 MB, matching API.
+- Currency options combine transactions, budgets and schedules so a new budget
+  currency remains accessible even before the first transaction in that currency.
+- Account changes cancel queries and clear caches. API response account markers
+  detect stale cross-tab identities. Server sessions remain HttpOnly.
+- Money writes use amount strings; JavaScript numbers only control display/charts.
+
+### Explicit design preview
+
+The sign-in screen offers **Explore a preview**. This selects client-only sample
+records and shows a persistent read-only/illustrative banner. It does not create
+a session, call protected APIs, modify records, or silently mask a backend error.
+Writes, deletion, uploads, exports, and custom-range submission are disabled.
+Leaving preview returns to normal private sign-in.
+
+### Development and production integration
+
+`npm run dev` listens on loopback port 5173. `/api` proxies to the existing backend
+at 127.0.0.1:8000. `changeOrigin: false` preserves Host/Origin matching for existing
+backend CSRF validation. An optional local `API_PROXY_TARGET` supports another
+backend port. Production `DASHBOARD_PUBLIC_URL` must match the actual browser
+origin; never disable origin checks to work around a configuration mismatch.
+
+Optional `VITE_WHATSAPP_NUMBER` is a public bot number for the signed-in convenience
+link only. Login uses the backend-provided WhatsApp link. Backend credentials stay
+outside the frontend. Do not copy the server .env into frontend variables.
+
+`app/main.py` now serves `frontend/dist` when a built index.html exists; otherwise
+it retains `app/static` as a fallback. Hash navigation avoids SPA path fallback
+changes. The root Dockerfile adds a Node 24 build stage and copies only dist into
+the Python image. Node/node_modules do not enter the runtime image. Git and Docker
+ignore rules exclude frontend dependencies/build output. The existing .env secret
+exclusion remains. Existing compose service ports are unchanged.
+
+To run the separate frontend from the copy:
+
+```powershell
+cd frontend
+npm ci
+npm run dev
+```
+
+Open http://127.0.0.1:5173/ and keep backend port 8000 running. To include the new
+UI in Docker, the user runs `docker compose up -d --build backend` from the copy
+root, then opens the backend's published port after startup. No such Docker
+command was executed during this implementation.
+
+### Validation and limitations
+
+`npm run build` completed successfully after the feature and accessibility
+changes. The preview root returned HTTP 200. No tests were added/run. Browser
+visual review could not be completed: IAB was unavailable, and the Windows browser
+helper stopped because it could not verify the browser URL with enough confidence.
+No screenshots or real-user login/mutation verification are claimed. Existing
+backend/model test counts do not establish coverage of this React implementation.
+
+Updated README and this context; added `frontend/README.md` with source structure,
+run/build/Docker steps, proxy/origin setup, explicit preview boundaries, API scope,
+and validation limitations. No cloud deployment or Docker Hub update occurred.
+
+
+### Dashboard query caching update
+
+- React Query keeps financial query results fresh for 5 minutes and retains inactive results for 30 minutes in memory.
+- Returning to the same account and filters within 5 minutes reuses the result without another query. Stale cached results remain visible while refreshed on mount, window focus, or network reconnection.
+- Existing successful edits, deletes, budget changes, recurring changes and confirmed imports invalidate account queries. Active views refresh; inactive views refresh when reopened.
+- Added an accessible Refresh dashboard data button to invalidate the current account cache on demand, useful after WhatsApp entries.
+- Cache keys remain account- and filter-specific. Sign-out/account changes clear the cache. No financial records are persisted in localStorage. A browser reload fetches again.
+- External WhatsApp/database changes are not pushed instantly. The next stale revalidation or manual Refresh retrieves them; no background interval polling or server revision endpoint was added.
+- No tests, Docker commands, or database mutations were run for this change.
+
+
+### Dashboard dark palette and larger text
+
+- Reversed the React dashboard palette: dark navy canvas/cards with light text; formerly dark net-position and sign-in story panels use light porcelain with navy text. Brass and semantic income/error accents remain readable.
+- Increased explicit desktop/mobile font sizes about 16 percent, with a 12px minimum for labels and 16px inputs. Added wrapping for controls/financial amounts and horizontal table overflow on mobile.
+- Updated chart track and series colors for dark backgrounds. Styled native controls/dialogs and retained focus/reduced-motion behavior.
+- Changes apply in expense-tracker - Copy only. No tests, live data changes or Docker commands run.
+
+
+### Sidebar width adjustment
+
+- Increased React sidebar width approximately 18 percent: 228px to 269px on desktop and mobile drawer; 210px to 248px at the intermediate breakpoint. Updated matching desktop content offsets. Mobile content retains zero offset. No tests or Docker commands run.
+
+
+### Frontend/backend directory separation
+
+- Moved app/, scripts/, requirements.txt, requirements.sweepr.txt, create_tables.py, test_intent.py, .env, .env.example and Dockerfile into backend/ without changing secret contents.
+- Moved app/static/ into frontend/legacy/ so the original dashboard fallback also resides with frontend assets.
+- Settings resolves backend/.env relative to config.py instead of the working directory. Existing environment-variable overrides continue to work. Script sys.path roots naturally resolve to backend/ after the move.
+- FastAPI resolves sibling frontend/dist/ and frontend/legacy/. No API routes, database schema, auth behavior, financial logic or cache policy changed.
+- backend/Dockerfile still uses the project root build context and Node multi-stage build; Python workdir is /app/backend, React build is at /app/frontend/dist, legacy assets at /app/frontend/legacy. Compose specifies the new Dockerfile and backend/.env.
+- Added recursive Docker exclusions for nested environment files, bytecode and backend logs. Git ignores secrets while allowing environment examples.
+- Root README now explains both applications, startup, scripts, Docker and current paths. Preserved detailed backend instructions in backend/README.md, updated frontend guide and annotated existing shared docs for the new layout.
+- Kept root venv in place because moving an existing virtual environment can break absolute paths. Kept project-level docs, context, Compose and diagram at root.
+- No regression tests, live provider calls, database changes, container builds, image pushes or deployments were performed for this restructure. Existing running processes must be restarted using the new paths.
+
+- Moved previous GLiNER stdout/stderr logs into ignored backend/logs/. Static Python syntax inspection passed without importing app modules or executing tests; live startup and Docker rebuild remain unverified.
+
+
+## 25. Full handoff refresh and TanStack explanation — 19 October 2026
+
+- Cross-checked current settings, routes/models, auth lifecycle, Query hooks, API helper and Compose source. Preserved all earlier history and recent change notes.
+- Added authoritative section 0 covering the latest folder split, provider roles, feature limits, UI/caching changes, authentication, commands, verification ledger and remaining setup. Flagged superseded early paths/shared-token UI.
+- Added docs/TANSTACK_QUERY_EXPLAINED.md: notebook analogy, exact implementation, timing, keys, queries/mutations, invalidation, cancellation/isolation, HTTP-cache distinction, WhatsApp limits and interview preparation.
+- Linked the guide from root README, frontend README and project explanation. No application behavior or secret values changed.
+- No tests, services, provider calls, database changes, Docker commands or deployments were run for this documentation refresh.
