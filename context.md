@@ -1669,3 +1669,11 @@ and validation limitations. No cloud deployment or Docker Hub update occurred.
 - Added docs/TANSTACK_QUERY_EXPLAINED.md: notebook analogy, exact implementation, timing, keys, queries/mutations, invalidation, cancellation/isolation, HTTP-cache distinction, WhatsApp limits and interview preparation.
 - Linked the guide from root README, frontend README and project explanation. No application behavior or secret values changed.
 - No tests, services, provider calls, database changes, Docker commands or deployments were run for this documentation refresh.
+
+## 26. GitHub-facing README and real interface screenshots — 21 October 2026
+
+- Replaced root README with a public project overview: Ledger/WhatsApp Expense Tracker positioning, feature matrix, six screenshot gallery, stack, provider responsibilities, Mermaid architecture, fresh-clone setup, environment reference, Docker, WhatsApp wiring, sample messages, local development, engineering details, source tree, regression/live checks and explicit limits.
+- Captured six real JPEG screenshots from the user's running container at localhost:8000, using only the built-in read-only illustrative preview and blank sign-in form. No real login, financial record changes, provider calls or screenshot mockups. Browser navigation is visual evidence of the running interface, not a full authentication/import regression test.
+- Saved images and capture provenance in assets/screenshots/, outside ignored /docs/, so GitHub-relative README images can be committed without changing the user's ignore rule. Existing .gitignore edits and frontend/package-lock.json edits were preserved.
+- README links only to tracked frontend/backend guides, not ignored docs. Explained Compose's GLiNER2 override, HTTP/application cache distinction through engineering notes, optional receipt vision, input/CSV/search limits and production privacy requirements. No unsupported license, hosted demo, test count or measured-performance claims added.
+- No Docker rebuild/restart, tests, commits, pushes or public publication was performed. Existing container was used as requested. The original project and open resume LaTeX were not edited.
