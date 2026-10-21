@@ -287,6 +287,23 @@ npm run build
 FastAPI selects `frontend/dist` when present at startup, otherwise
 `frontend/legacy`. Restart the local backend after first creating the React build.
 
+## Try a sample bank statement
+
+Download [the example CSV](backend/examples/bank_statement.csv) to try the import
+workflow. It contains five fictional INR entries: one income and four expenses,
+dated October 2026. No personal financial data is included.
+
+1. Sign in to your dashboard and open **Imports**.
+2. Choose **Choose statement** and select the downloaded CSV.
+3. Review the dates, amounts, categories, and possible-duplicate flags.
+4. Save only the rows you want to keep using **Import selected**.
+
+Uploading only creates a preview. Confirming adds the selected fictional records
+to your signed-in ledger, so stop at the preview if you do not want sample data
+saved. The read-only design preview does not accept imports. Choose October 2026
+in Transactions to see these records after importing, or change the CSV dates
+before upload. Re-uploading unchanged entries allows you to inspect duplicate flags.
+
 ## Engineering details
 
 - **Caching:** account/resource/filter query keys, five-minute freshness, thirty-minute inactive retention, and invalidation after successful mutations. Manual Refresh picks up external changes; there is no instant WhatsApp-to-browser push.

@@ -1,0 +1,6 @@
+date,description,amount,type,currency,category
+2026-10-01,Example monthly salary,65000.00,credit,INR,salary
+2026-10-02,Example groceries,1250.00,debit,INR,food
+2026-10-03,Example bus fare,80.00,debit,INR,transport
+2026-10-04,Example electricity bill,1800.00,debit,INR,bills
+2026-10-05,Example course materials,499.00,debit,INR,education

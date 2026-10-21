@@ -1677,3 +1677,8 @@ and validation limitations. No cloud deployment or Docker Hub update occurred.
 - Saved images and capture provenance in assets/screenshots/, outside ignored /docs/, so GitHub-relative README images can be committed without changing the user's ignore rule. Existing .gitignore edits and frontend/package-lock.json edits were preserved.
 - README links only to tracked frontend/backend guides, not ignored docs. Explained Compose's GLiNER2 override, HTTP/application cache distinction through engineering notes, optional receipt vision, input/CSV/search limits and production privacy requirements. No unsupported license, hosted demo, test count or measured-performance claims added.
 - No Docker rebuild/restart, tests, commits, pushes or public publication was performed. Existing container was used as requested. The original project and open resume LaTeX were not edited.
+## 27. Example bank-statement CSV — 21 October 2026
+
+- Added backend/examples/bank_statement.csv with five fictional October 2026 INR entries using supported date/description/amount/type/currency/category headers: one salary credit and four expense debits.
+- Linked it from the public README with preview/confirmation instructions, fixed-date guidance and clarification that confirming writes fictional records into the signed-in account; design preview imports remain disabled.
+- No imports, database writes or tests were performed. Changes left uncommitted and unpushed for the user.
